@@ -15,6 +15,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 #include "api/audio/audio_device_defines.h"
 #include "api/environment/environment.h"
@@ -76,6 +77,14 @@ class AudioRecordJni : public AudioInput {
 
   int32_t EnableBuiltInAEC(bool enable) override;
   int32_t EnableBuiltInNS(bool enable) override;
+
+  int32_t SetMicrophoneMute(bool mute) override;
+  std::optional<bool> MicrophoneMute() const override;
+
+  std::optional<bool> BuiltInAECIsRequested() const override;
+  std::optional<bool> BuiltInAECIsEnabled() const override;
+  std::optional<bool> BuiltInNSIsRequested() const override;
+  std::optional<bool> BuiltInNSIsEnabled() const override;
 
   // Called from Java side so we can cache the address of the Java-manged
   // `byte_buffer` in `direct_buffer_address_`. The size of the buffer

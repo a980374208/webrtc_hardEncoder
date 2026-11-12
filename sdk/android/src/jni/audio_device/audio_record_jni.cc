@@ -234,12 +234,50 @@ int32_t AudioRecordJni::EnableBuiltInAEC(bool enable) {
              : -1;
 }
 
+int32_t AudioRecordJni::SetMicrophoneMute(bool mute) {
+  RTC_LOG(LS_INFO) << "SetMicrophoneMute(" << mute << ")";
+  RTC_DCHECK(thread_checker_.IsCurrent());
+  Java_WebRtcAudioRecord_setMicrophoneMute(env_, j_audio_record_, mute);
+  return 0;
+}
+
+std::optional<bool> AudioRecordJni::MicrophoneMute() const {
+  RTC_DCHECK(thread_checker_.IsCurrent());
+  return Java_WebRtcAudioRecord_getMicrophoneMute(env_, j_audio_record_);
+}
+
 int32_t AudioRecordJni::EnableBuiltInNS(bool enable) {
   RTC_LOG(LS_INFO) << "EnableBuiltInNS(" << enable << ")";
   RTC_DCHECK(thread_checker_.IsCurrent());
   return Java_WebRtcAudioRecord_enableBuiltInNS(env_, j_audio_record_, enable)
              ? 0
              : -1;
+}
+
+std::optional<bool> AudioRecordJni::BuiltInAECIsRequested() const {
+  RTC_DCHECK(thread_checker_.IsCurrent());
+  return Java_WebRtcAudioRecord_isBuiltInAECRequested(env_, j_audio_record_);
+}
+
+std::optional<bool> AudioRecordJni::BuiltInAECIsEnabled() const {
+  RTC_DCHECK(thread_checker_.IsCurrent());
+  if (!Java_WebRtcAudioRecord_hasBuiltInAEC(env_, j_audio_record_)) {
+    return std::nullopt;
+  }
+  return Java_WebRtcAudioRecord_isBuiltInAECEnabled(env_, j_audio_record_);
+}
+
+std::optional<bool> AudioRecordJni::BuiltInNSIsRequested() const {
+  RTC_DCHECK(thread_checker_.IsCurrent());
+  return Java_WebRtcAudioRecord_isBuiltInNSRequested(env_, j_audio_record_);
+}
+
+std::optional<bool> AudioRecordJni::BuiltInNSIsEnabled() const {
+  RTC_DCHECK(thread_checker_.IsCurrent());
+  if (!Java_WebRtcAudioRecord_hasBuiltInNS(env_, j_audio_record_)) {
+    return std::nullopt;
+  }
+  return Java_WebRtcAudioRecord_isBuiltInNSEnabled(env_, j_audio_record_);
 }
 
 void AudioRecordJni::CacheDirectBufferAddress(
