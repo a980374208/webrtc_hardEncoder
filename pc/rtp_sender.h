@@ -307,6 +307,12 @@ class LocalAudioSinkAdapter : public AudioTrackSinkInterface,
   LocalAudioSinkAdapter();
   virtual ~LocalAudioSinkAdapter();
 
+  // Set whether the original AudioSourceInterface is an external source.
+  // This propagates the is_external_source state from AudioSourceInterface
+  // to this AudioSource adapter.
+  void set_is_external_source(bool value) { is_external_source_ = value; }
+  bool is_external_source() const override { return is_external_source_; }
+
  private:
   // AudioSinkInterface implementation.
   void OnData(const void* audio_data,
@@ -337,6 +343,7 @@ class LocalAudioSinkAdapter : public AudioTrackSinkInterface,
   // Critical section protecting `sink_`.
   Mutex lock_;
   int num_preferred_channels_ = -1;
+  bool is_external_source_ = false;
 };
 
 class AudioRtpSender : public DtmfProviderInterface, public RtpSenderBase {

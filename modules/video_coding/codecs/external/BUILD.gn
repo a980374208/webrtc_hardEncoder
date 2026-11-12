@@ -1,0 +1,690 @@
+# Copyright (c) 2026 The WebRTC project authors. All Rights Reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file in the root of the source tree.
+
+import("../../../../webrtc.gni")
+
+rtc_library("hardware_encoder_probe") {
+  sources = [
+    "hardware_encoder_probe.cc",
+    "hardware_encoder_probe.h",
+    "video_encoder_backend.h",
+  ]
+  deps = [ "../../../../rtc_base:logging" ]
+}
+
+rtc_library("backend_video_encoder") {
+  sources = [
+    "backend_video_encoder.cc",
+    "backend_video_encoder.h",
+    "h265_encoder_policy.h",
+    "hardware_h264_encoder_policy.h",
+    "video_encoder_backend.h",
+  ]
+  deps = [
+    ":hardware_encoder_probe",
+    "../..:codec_globals_headers",
+    "../..:video_codec_interface",
+    "../../../../api:array_view",
+    "../../../../api:scoped_refptr",
+    "../../../../api:sequence_checker",
+    "../../../../api/video:encoded_image",
+    "../../../../api/video:video_frame",
+    "../../../../api/video:video_frame_type",
+    "../../../../api/video_codecs:scalability_mode",
+    "../../../../api/video_codecs:video_codecs_api",
+    "../../../../common_video",
+    "../../../../rtc_base:bitstream_reader",
+    "../../../../rtc_base:checks",
+    "../../../../rtc_base:logging",
+  ]
+}
+
+if (rtc_use_nvenc) {
+  assert(is_win && rtc_use_h264,
+         "NVENC currently requires Windows and rtc_use_h264")
+  assert(rtc_nvenc_include_dir != "",
+         "Set rtc_nvenc_include_dir to the directory containing nvEncodeAPI.h")
+
+  rtc_library("nvenc_video_encoder_backend") {
+    sources = [
+      "nvenc_capability_query.h",
+      "nvenc_video_encoder_backend.cc",
+      "nvenc_video_encoder_backend.h",
+      "video_encoder_backend.h",
+    ]
+    deps = [
+      ":hardware_encoder_probe",
+      "../../../../rtc_base:logging",
+    ]
+    include_dirs = [ rtc_nvenc_include_dir ]
+    libs = [
+      "d3d11.lib",
+      "dxgi.lib",
+    ]
+  }
+
+  rtc_library("nvenc_video_encoder") {
+    sources = [
+      "nvenc_video_encoder.cc",
+      "nvenc_video_encoder.h",
+    ]
+    deps = [
+      ":backend_video_encoder",
+      ":nvenc_video_encoder_backend",
+      "../..:webrtc_h264",
+      "../../../../api/environment",
+      "../../../../api/video_codecs:rtc_software_fallback_wrappers",
+      "../../../../api/video_codecs:video_codecs_api",
+      "../../../../rtc_base:logging",
+    ]
+    if (rtc_use_x265) {
+      defines = [ "RTC_USE_X265" ]
+      deps += [ ":x265_video_encoder" ]
+    }
+  }
+
+  if (rtc_nvenc_build_tests) {
+    rtc_executable("nvenc_h264_smoke") {
+      testonly = true
+      sources = [ "nvenc_h264_smoke.cc" ]
+      if (rtc_use_qsv) {
+        defines = [ "RTC_USE_QSV" ]
+      }
+      deps = [
+        ":backend_video_encoder",
+        ":nvenc_video_encoder_backend",
+        "../..:video_codec_interface",
+        "../..:video_coding",
+        "../..:webrtc_h264",
+        "../../../../api:array_view",
+        "../../../../api/environment:environment_factory",
+        "../../../../api/video:encoded_image",
+        "../../../../api/video:video_frame",
+        "../../../../api/video:video_frame_type",
+        "../../../../api/video:video_rtp_headers",
+        "../../../../api/video_codecs:builtin_video_encoder_factory",
+        "../../../../api/video_codecs:video_codecs_api",
+        "../../../../common_video",
+        "../../../../rtc_base:buffer",
+        "../../../../rtc_base:copy_on_write_buffer",
+        "../../../../rtc_base:logging",
+        "../../../rtp_rtcp",
+        "../../../rtp_rtcp:rtp_rtcp_format",
+        "../../../rtp_rtcp:rtp_video_header",
+        "//third_party/libyuv",
+      ]
+      if (rtc_use_qsv) {
+        deps += [ "../../../../api:field_trials" ]
+      }
+    }
+
+    if (rtc_use_h265) {
+      rtc_executable("nvenc_h265_smoke") {
+        testonly = true
+        sources = [ "nvenc_h265_smoke.cc" ]
+        if (rtc_use_qsv) {
+          defines = [ "RTC_USE_QSV" ]
+        }
+        deps = [
+          ":backend_video_encoder",
+          ":nvenc_video_encoder_backend",
+          "../..:video_codec_interface",
+          "../../../../api:array_view",
+          "../../../../api:field_trials",
+          "../../../../api/environment:environment_factory",
+          "../../../../api/video:encoded_image",
+          "../../../../api/video:video_frame",
+          "../../../../api/video:video_frame_type",
+          "../../../../api/video:video_rtp_headers",
+          "../../../../api/video_codecs:builtin_video_encoder_factory",
+          "../../../../api/video_codecs:video_codecs_api",
+          "../../../../common_video",
+          "../../../../rtc_base:copy_on_write_buffer",
+          "../../../../rtc_base:logging",
+          "../../../rtp_rtcp",
+          "../../../rtp_rtcp:rtp_rtcp_format",
+          "../../../rtp_rtcp:rtp_video_header",
+        ]
+      }
+    }
+  }
+}
+
+if (rtc_nvenc_build_tests || rtc_qsv_build_tests || rtc_x265_build_tests ||
+    rtc_amf_build_tests) {
+  # Reuse the existing API regression suite without enabling unrelated tests.
+  rtc_executable("software_fallback_wrapper_regression") {
+    testonly = true
+    sources = [
+      "../../../../api/test/mock_video_encoder.h",
+      "../../../../api/video_codecs/test/video_encoder_software_fallback_wrapper_unittest.cc",
+      "../../../../test/fake_texture_frame.cc",
+      "../../../../test/fake_texture_frame.h",
+    ]
+    deps = [
+      "../..:video_codec_interface",
+      "../..:video_coding_utility",
+      "../..:webrtc_vp8",
+      "../../../../api:fec_controller_api",
+      "../../../../api:make_ref_counted",
+      "../../../../api:scoped_refptr",
+      "../../../../api/environment",
+      "../../../../api/environment:environment_factory",
+      "../../../../api/units:timestamp",
+      "../../../../api/video:encoded_image",
+      "../../../../api/video:video_bitrate_allocator",
+      "../../../../api/video:video_frame",
+      "../../../../api/video:video_frame_type",
+      "../../../../api/video:video_rtp_headers",
+      "../../../../api/video_codecs:rtc_software_fallback_wrappers",
+      "../../../../api/video_codecs:video_codecs_api",
+      "../../../../rtc_base:rtc_base_tests_utils",
+      "../../../../test:create_test_field_trials",
+      "../../../../test:fake_video_codecs",
+      "../../../../test:test_support",
+      "//testing/gtest:gtest_main",
+    ]
+  }
+
+  rtc_executable("backend_video_encoder_unittests") {
+    testonly = true
+    sources = [
+      "backend_video_encoder_unittest.cc",
+      "hardware_encoder_probe_unittest.cc",
+      "hardware_h264_encoder_policy_unittest.cc",
+      "nvenc_capability_query.h",
+      "nvenc_capability_query_unittest.cc",
+      "vendor_close_status_unittest.cc",
+    ]
+    if (rtc_use_h265) {
+      sources += [ "backend_video_encoder_h265_unittest.cc" ]
+    }
+    if (rtc_use_x265) {
+      sources += [
+        "h265_encoder_policy_unittest.cc",
+        "x265_backend_unittest.cc",
+      ]
+    }
+    if (rtc_use_amf) {
+      sources += [ "amf_backend_unittest.cc" ]
+    }
+    if (rtc_use_qsv) {
+      sources += [
+        "qsv_backend_config_unittest.cc",
+        "qsv_device_handle.h",
+        "qsv_device_handle_unittest.cc",
+      ]
+      if (rtc_use_h265) {
+        sources += [ "qsv_hevc_dimensions_unittest.cc" ]
+      }
+    }
+    deps = [
+      ":backend_video_encoder",
+      ":hardware_encoder_probe",
+      "../..:video_codec_interface",
+      "../..:webrtc_h264",
+      "../../../../api/environment:environment_factory",
+      "../../../../api/video:encoded_image",
+      "../../../../api/video:video_frame",
+      "../../../../api/video:video_rtp_headers",
+      "../../../../api/video_codecs:rtc_software_fallback_wrappers",
+      "../../../../api/video_codecs:video_codecs_api",
+      "../../../../common_video",
+      "../../../../rtc_base:buffer",
+      "../../../../test:test_support",
+    ]
+    if (rtc_use_qsv) {
+      deps += [ ":qsv_video_encoder_backend" ]
+    }
+    if (rtc_use_x265) {
+      deps += [
+        ":x265_video_encoder_backend",
+        "../../../../api:array_view",
+      ]
+    }
+    if (rtc_use_amf) {
+      deps += [ ":amf_video_encoder_backend" ]
+    }
+  }
+}
+
+if (rtc_use_amf) {
+  assert(is_win && rtc_use_h264,
+         "AMF currently requires Windows and rtc_use_h264")
+  assert(rtc_amf_include_dir != "",
+         "Set rtc_amf_include_dir to the external AMF SDK root")
+
+  rtc_library("amf_video_encoder_backend") {
+    sources = [
+      "amf_hevc_level_limits.h",
+      "amf_video_encoder_backend.cc",
+      "amf_video_encoder_backend.h",
+      "video_encoder_backend.h",
+    ]
+    include_dirs = [ rtc_amf_include_dir ]
+    deps = [
+      ":hardware_encoder_probe",
+      "../../../../api:array_view",
+      "../../../../common_video",
+      "../../../../rtc_base:bitstream_reader",
+      "../../../../rtc_base:logging",
+    ]
+    libs = [
+      "d3d11.lib",
+      "dxgi.lib",
+    ]
+  }
+
+  rtc_library("amf_video_encoder") {
+    sources = [
+      "amf_video_encoder.cc",
+      "amf_video_encoder.h",
+    ]
+    deps = [
+      ":amf_video_encoder_backend",
+      ":backend_video_encoder",
+      "../..:webrtc_h264",
+      "../../../../api/environment",
+      "../../../../api/video_codecs:rtc_software_fallback_wrappers",
+      "../../../../api/video_codecs:video_codecs_api",
+      "../../../../rtc_base:logging",
+    ]
+    if (rtc_use_x265) {
+      defines = [ "RTC_USE_X265" ]
+      deps += [ ":x265_video_encoder" ]
+    }
+  }
+
+  if (rtc_amf_build_tests) {
+    if (rtc_use_h265) {
+      assert(
+          rtc_amf_test_ffmpeg_include_dir != "",
+          "AMF HEVC acceptance tests require an external FFmpeg 61/59 SDK include root")
+      rtc_library("ffmpeg_h265_test_decoder") {
+        testonly = true
+        sources = [
+          "ffmpeg_h265_test_decoder.cc",
+          "ffmpeg_h265_test_decoder.h",
+        ]
+        include_dirs = [ rtc_amf_test_ffmpeg_include_dir ]
+        deps = [
+          "../..:video_codec_interface",
+          "../../../../api/video:encoded_image",
+          "../../../../api/video:video_frame",
+          "../../../../api/video_codecs:video_codecs_api",
+          "../../../../rtc_base:logging",
+        ]
+      }
+      if (rtc_use_x265) {
+        rtc_executable("amf_fallback_smoke") {
+          testonly = true
+          sources = [ "amf_fallback_smoke.cc" ]
+          deps = [
+            ":amf_video_encoder_backend",
+            ":backend_video_encoder",
+            ":ffmpeg_h265_test_decoder",
+            ":x265_video_encoder",
+            "../..:video_codec_interface",
+            "../..:webrtc_h264",
+            "../../../../api:array_view",
+            "../../../../api/environment:environment_factory",
+            "../../../../api/video:encoded_image",
+            "../../../../api/video:video_frame",
+            "../../../../api/video:video_frame_type",
+            "../../../../api/video_codecs:rtc_software_fallback_wrappers",
+            "../../../../api/video_codecs:video_codecs_api",
+            "../../../../common_video",
+            "../../../../rtc_base:logging",
+            "//third_party/libyuv",
+          ]
+        }
+      }
+    }
+    if (rtc_use_h265) {
+      rtc_executable("amf_control_smoke") {
+        testonly = true
+        sources = [ "amf_control_smoke.cc" ]
+        deps = [
+          "../..:video_codec_interface",
+          "../..:webrtc_h264",
+          "../../../../api:array_view",
+          "../../../../api:field_trials",
+          "../../../../api/environment:environment_factory",
+          "../../../../api/video:encoded_image",
+          "../../../../api/video:video_frame",
+          "../../../../api/video:video_frame_type",
+          "../../../../api/video_codecs:builtin_video_encoder_factory",
+          "../../../../api/video_codecs:video_codecs_api",
+          "../../../../common_video",
+          "../../../../rtc_base:bitstream_reader",
+          "../../../../rtc_base:logging",
+        ]
+        if (rtc_use_h265) {
+          deps += [ ":ffmpeg_h265_test_decoder" ]
+        }
+        libs = [
+          "dxgi.lib",
+          "psapi.lib",
+        ]
+      }
+      rtc_executable("amf_peer_connection_smoke") {
+        testonly = true
+        sources = [ "amf_peer_connection_smoke.cc" ]
+        deps = [
+          ":backend_video_encoder",
+          "../..:video_codec_interface",
+          "../../../../api:array_view",
+          "../../../../api:create_modular_peer_connection_factory",
+          "../../../../api:enable_media",
+          "../../../../api:field_trials",
+          "../../../../api:jsep",
+          "../../../../api:make_ref_counted",
+          "../../../../api:media_stream_interface",
+          "../../../../api:peer_connection_interface",
+          "../../../../api:rtc_stats_api",
+          "../../../../api:rtp_parameters",
+          "../../../../api:rtp_receiver_interface",
+          "../../../../api:rtp_sender_interface",
+          "../../../../api:rtp_transceiver_interface",
+          "../../../../api:scoped_refptr",
+          "../../../../api:set_local_description_observer_interface",
+          "../../../../api:set_remote_description_observer_interface",
+          "../../../../api/audio:audio_device",
+          "../../../../api/audio:create_audio_device_module",
+          "../../../../api/audio_codecs:builtin_audio_decoder_factory",
+          "../../../../api/audio_codecs:builtin_audio_encoder_factory",
+          "../../../../api/environment:environment_factory",
+          "../../../../api/transport:bitrate_settings",
+          "../../../../api/video:video_frame",
+          "../../../../api/video:video_frame_type",
+          "../../../../api/video_codecs:builtin_video_decoder_factory",
+          "../../../../api/video_codecs:builtin_video_encoder_factory",
+          "../../../../api/video_codecs:video_codecs_api",
+          "../../../../media:video_broadcaster",
+          "../../../../pc:video_track_source",
+          "../../../../rtc_base:logging",
+          "../../../../rtc_base:ssl_adapter",
+          "../../../../rtc_base:threading",
+          "../../../../rtc_base:timeutils",
+          "../../../../rtc_base:win32_socket_init",
+          "../../../../stats",
+          "../../../desktop_capture",
+          "../../../desktop_capture:primitives",
+          "//third_party/libyuv",
+        ]
+        if (rtc_use_h265) {
+          deps += [ ":ffmpeg_h265_test_decoder" ]
+        }
+        libs = [ "user32.lib" ]
+      }
+    }
+    rtc_executable("amf_capability_probe") {
+      testonly = true
+      sources = [ "amf_capability_probe.cc" ]
+      deps = [ ":amf_video_encoder_backend" ]
+    }
+    rtc_executable("amf_h264_smoke") {
+      testonly = true
+      sources = [ "nvenc_h264_smoke.cc" ]
+      defines = [ "RTC_AMF_H264_SMOKE" ]
+      deps = [
+        ":amf_video_encoder_backend",
+        ":backend_video_encoder",
+        "../..:video_codec_interface",
+        "../..:video_coding",
+        "../..:webrtc_h264",
+        "../../../../api:array_view",
+        "../../../../api:field_trials",
+        "../../../../api/environment:environment_factory",
+        "../../../../api/video:encoded_image",
+        "../../../../api/video:video_frame",
+        "../../../../api/video:video_frame_type",
+        "../../../../api/video:video_rtp_headers",
+        "../../../../api/video_codecs:builtin_video_encoder_factory",
+        "../../../../api/video_codecs:video_codecs_api",
+        "../../../../common_video",
+        "../../../../rtc_base:buffer",
+        "../../../../rtc_base:copy_on_write_buffer",
+        "../../../../rtc_base:logging",
+        "../../../rtp_rtcp",
+        "../../../rtp_rtcp:rtp_rtcp_format",
+        "../../../rtp_rtcp:rtp_video_header",
+        "//third_party/libyuv",
+      ]
+    }
+  }
+}
+
+if (rtc_use_x265) {
+  assert(is_win && rtc_use_h265,
+         "x265 currently requires Windows and rtc_use_h265")
+  assert(
+      rtc_x265_include_dir != "" && rtc_x265_library != "" &&
+          rtc_x265_license_file != "",
+      "Set x265 include, CRT-matched static library and original COPYING paths")
+
+  rtc_library("x265_video_encoder_backend") {
+    sources = [
+      "video_encoder_backend.h",
+      "x265_video_encoder_backend.cc",
+      "x265_video_encoder_backend.h",
+    ]
+    deps = [
+      "../../../../api:array_view",
+      "../../../../common_video",
+      "../../../../rtc_base:bitstream_reader",
+      "../../../../rtc_base:logging",
+    ]
+    include_dirs = [ rtc_x265_include_dir ]
+
+    # Match the 8-bit, single-view upstream build's public header conditions.
+    # x265 4.1 leaves disabled feature macros undefined; WebRTC uses -Wundef.
+    defines = [
+      "X265_DEPTH=8",
+      "ENABLE_ALPHA=0",
+      "ENABLE_MULTIVIEW=0",
+      "ENABLE_SCC_EXT=0",
+      "ENABLE_LIBVMAF=0",
+    ]
+    libs = [ rtc_x265_library ]
+    metadata = {
+      external_license_files = [ rtc_x265_license_file ]
+    }
+  }
+
+  rtc_library("x265_video_encoder") {
+    sources = [
+      "x265_video_encoder.cc",
+      "x265_video_encoder.h",
+    ]
+    deps = [
+      ":backend_video_encoder",
+      ":x265_video_encoder_backend",
+      "../../../../api/environment",
+      "../../../../api/video_codecs:video_codecs_api",
+    ]
+  }
+
+  if (rtc_x265_build_tests) {
+    rtc_executable("x265_performance_probe") {
+      testonly = true
+      sources = [ "x265_performance_probe.cc" ]
+      deps = [
+        "../..:video_codec_interface",
+        "../../../../api:array_view",
+        "../../../../api:field_trials",
+        "../../../../api:scoped_refptr",
+        "../../../../api/environment:environment_factory",
+        "../../../../api/video:encoded_image",
+        "../../../../api/video:video_frame",
+        "../../../../api/video:video_frame_type",
+        "../../../../api/video_codecs:builtin_video_encoder_factory",
+        "../../../../api/video_codecs:video_codecs_api",
+        "../../../../common_video",
+        "../../../../rtc_base:logging",
+        "//third_party/libyuv",
+      ]
+    }
+
+    rtc_executable("x265_screen_sequence_capture") {
+      testonly = true
+      sources = [ "x265_screen_sequence_capture.cc" ]
+      deps = [
+        "../../../../api:scoped_refptr",
+        "../../../../api/video:video_frame",
+        "../../../../common_video",
+        "../../../../rtc_base:logging",
+        "../../../desktop_capture",
+        "../../../desktop_capture:primitives",
+        "//third_party/libyuv",
+      ]
+      libs = [ "user32.lib" ]
+    }
+
+    rtc_executable("x265_h265_smoke") {
+      testonly = true
+      sources = [ "nvenc_h265_smoke.cc" ]
+      defines = [ "RTC_X265_H265_SMOKE" ]
+      deps = [
+        ":backend_video_encoder",
+        ":x265_video_encoder_backend",
+        "../..:video_codec_interface",
+        "../../../../api:array_view",
+        "../../../../api:field_trials",
+        "../../../../api/environment:environment_factory",
+        "../../../../api/video:encoded_image",
+        "../../../../api/video:video_frame",
+        "../../../../api/video:video_frame_type",
+        "../../../../api/video:video_rtp_headers",
+        "../../../../api/video_codecs:builtin_video_encoder_factory",
+        "../../../../api/video_codecs:video_codecs_api",
+        "../../../../common_video",
+        "../../../../rtc_base:copy_on_write_buffer",
+        "../../../../rtc_base:logging",
+        "../../../rtp_rtcp",
+        "../../../rtp_rtcp:rtp_rtcp_format",
+        "../../../rtp_rtcp:rtp_video_header",
+      ]
+    }
+  }
+}
+
+if (rtc_use_qsv) {
+  assert(is_win && rtc_use_h264,
+         "QSV currently requires Windows and rtc_use_h264")
+  assert(
+      rtc_qsv_include_dir != "" && rtc_qsv_vpl_library != "",
+      "Set rtc_qsv_include_dir and rtc_qsv_vpl_library for a CRT-matched static oneVPL dispatcher")
+
+  rtc_library("qsv_video_encoder_backend") {
+    sources = [
+      "qsv_device_handle.h",
+      "qsv_video_encoder_backend.cc",
+      "qsv_video_encoder_backend.h",
+      "video_encoder_backend.h",
+    ]
+    deps = [
+      ":hardware_encoder_probe",
+      "../../../../rtc_base:logging",
+    ]
+    if (rtc_use_h265) {
+      sources += [ "qsv_hevc_dimensions.h" ]
+      deps += [
+        "../../../../api:array_view",
+        "../../../../common_video",
+        "../../../../rtc_base:bitstream_reader",
+      ]
+    }
+    include_dirs = [ rtc_qsv_include_dir ]
+    libs = [
+      rtc_qsv_vpl_library,
+      "d3d11.lib",
+      "dxgi.lib",
+      "advapi32.lib",
+    ]
+  }
+
+  rtc_library("qsv_video_encoder") {
+    sources = [
+      "qsv_video_encoder.cc",
+      "qsv_video_encoder.h",
+    ]
+    deps = [
+      ":backend_video_encoder",
+      ":qsv_video_encoder_backend",
+      "../..:webrtc_h264",
+      "../../../../api/environment",
+      "../../../../api/video_codecs:rtc_software_fallback_wrappers",
+      "../../../../api/video_codecs:video_codecs_api",
+      "../../../../rtc_base:logging",
+    ]
+    if (rtc_use_x265) {
+      defines = [ "RTC_USE_X265" ]
+      deps += [ ":x265_video_encoder" ]
+    }
+  }
+
+  if (rtc_qsv_build_tests) {
+    rtc_executable("qsv_h264_smoke") {
+      testonly = true
+      sources = [ "nvenc_h264_smoke.cc" ]
+      defines = [ "RTC_QSV_H264_SMOKE" ]
+      deps = [
+        ":backend_video_encoder",
+        ":qsv_video_encoder_backend",
+        "../..:video_codec_interface",
+        "../..:video_coding",
+        "../..:webrtc_h264",
+        "../../../../api:array_view",
+        "../../../../api/environment:environment_factory",
+        "../../../../api/video:encoded_image",
+        "../../../../api/video:video_frame",
+        "../../../../api/video:video_frame_type",
+        "../../../../api/video:video_rtp_headers",
+        "../../../../api/video_codecs:builtin_video_encoder_factory",
+        "../../../../api/video_codecs:video_codecs_api",
+        "../../../../common_video",
+        "../../../../rtc_base:buffer",
+        "../../../../rtc_base:copy_on_write_buffer",
+        "../../../../rtc_base:logging",
+        "../../../rtp_rtcp",
+        "../../../rtp_rtcp:rtp_rtcp_format",
+        "../../../rtp_rtcp:rtp_video_header",
+        "//third_party/libyuv",
+      ]
+      deps += [ "../../../../api:field_trials" ]
+    }
+
+    if (rtc_use_h265) {
+      rtc_executable("qsv_h265_smoke") {
+        testonly = true
+        sources = [
+          "nvenc_h265_smoke.cc",
+          "qsv_crash_diagnostics.h",
+        ]
+        defines = [ "RTC_QSV_H265_SMOKE" ]
+        deps = [
+          ":backend_video_encoder",
+          ":qsv_video_encoder_backend",
+          "../..:video_codec_interface",
+          "../../../../api:array_view",
+          "../../../../api:field_trials",
+          "../../../../api/environment:environment_factory",
+          "../../../../api/video:encoded_image",
+          "../../../../api/video:video_frame",
+          "../../../../api/video:video_frame_type",
+          "../../../../api/video:video_rtp_headers",
+          "../../../../api/video_codecs:builtin_video_encoder_factory",
+          "../../../../api/video_codecs:video_codecs_api",
+          "../../../../common_video",
+          "../../../../rtc_base:copy_on_write_buffer",
+          "../../../../rtc_base:logging",
+          "../../../rtp_rtcp",
+          "../../../rtp_rtcp:rtp_rtcp_format",
+          "../../../rtp_rtcp:rtp_video_header",
+        ]
+      }
+    }
+  }
+}

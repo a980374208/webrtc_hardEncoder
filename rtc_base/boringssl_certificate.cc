@@ -252,6 +252,12 @@ BoringSSLCertificate::BoringSSLCertificate(
   RTC_DCHECK(cert_buffer_ != nullptr);
 }
 
+BoringSSLCertificate::BoringSSLCertificate(
+    bssl::UniquePtr<CRYPTO_BUFFER> cert_buffer, SSL* ssl)
+    : cert_buffer_(std::move(cert_buffer)), ssl_(ssl) {
+  RTC_DCHECK(cert_buffer_ != nullptr);
+}
+
 std::unique_ptr<BoringSSLCertificate> BoringSSLCertificate::Generate(
     OpenSSLKeyPair* key_pair,
     const SSLIdentityParams& params) {

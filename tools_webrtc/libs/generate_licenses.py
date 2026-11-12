@@ -92,6 +92,18 @@ LIB_TO_LICENSES_DICT = {
     # Compile time dependencies, no license needed:
     'ow2_asm': [],
     'jdk': [],
+
+    'ffmpeg':[
+        'third_party/ffmpeg/COPYING.GPLv2',
+        'third_party/ffmpeg/COPYING.GPLv3',
+        'third_party/ffmpeg/COPYING.LGPLv2.1',
+        'third_party/ffmpeg/COPYING.LGPLv3'
+    ],
+    'openh264': ['third_party/openh264/src/LICENSE'],
+    'catapult': [],
+    'google_benchmark': [],
+    'googletest': [],
+    'vinn': [],
 }
 
 # Third_party library _regex_ to licences mapping. Keys are regular expression
@@ -181,7 +193,7 @@ class LicenseBuilder:
         return libname
 
     @staticmethod
-    def _run_gn(buildfile_dir, target):
+    def _run_gn(buildfile_dir, target, what=None):
         cmd = [
             sys.executable,
             os.path.join(find_depot_tools.DEPOT_TOOLS_PATH, 'gn.py'),
@@ -191,6 +203,8 @@ class LicenseBuilder:
             os.path.abspath(buildfile_dir),
             target,
         ]
+        if what is not None:
+            cmd.append(what)
         logging.debug('Running: %r', cmd)
         output_json = subprocess.check_output(cmd,
                                               cwd=WEBRTC_ROOT).decode('UTF-8')
@@ -205,10 +219,25 @@ class LicenseBuilder:
             logging.error("unable to parse license_json = '%s'", license_json)
             raise
         libraries = set()
+        x265_target = '//modules/video_coding/codecs/external:x265_video_encoder_backend'
+        x265_targets = {target} if target.split('(')[0] == x265_target else set()
         for described_target in list(output.values()):
+            x265_targets.update(dep for dep in described_target['deps']
+                                if dep.split('(')[0] == x265_target)
             third_party_libs = (self._parse_library(dep)
                                 for dep in described_target['deps'])
             libraries |= set(lib for lib in third_party_libs if lib)
+        # GN's default desc omits metadata. External static libs have no
+        # third_party target, so query the linked backend's original license.
+        for dependency in sorted(x265_targets):
+            metadata = json.loads(self._run_gn(buildfile_dir, dependency, 'metadata'))
+            paths = [path for item in metadata.values()
+                     for path in item.get('metadata', {}).get('external_license_files', [])]
+            if not paths:
+                raise ValueError('Missing original x265 license metadata: ' + dependency)
+            existing = self.common_licenses_dict.get('x265', [])
+            self.common_licenses_dict['x265'] = sorted(set(existing) | set(paths))
+            libraries.add('x265')
         return libraries
 
     def generate_license_text(self, output_dir):

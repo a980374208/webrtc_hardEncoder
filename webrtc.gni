@@ -179,6 +179,35 @@ declare_args() {
   # Use system OpenH264
   rtc_system_openh264 = false
 
+  # Opt-in Windows NVENC H.264/H.265 backend. SDK headers stay outside the tree.
+  rtc_use_nvenc = false
+  rtc_nvenc_include_dir = ""
+
+  # Standalone focused gates, independent of rtc_include_tests.
+  rtc_nvenc_build_tests = false
+
+  # Opt-in Windows QSV H.264/H.265 via a CRT-compatible static oneVPL dispatcher.
+  rtc_use_qsv = false
+  rtc_qsv_include_dir = ""
+  rtc_qsv_vpl_library = ""
+  rtc_qsv_build_tests = false
+
+  # Opt-in Windows AMD AMF backend. Runtime comes from the installed driver;
+  # SDK headers remain external and no AMF import library is required.
+  rtc_use_amf = false
+  rtc_amf_include_dir = ""
+  rtc_amf_build_tests = false
+
+  # Test-only HEVC receiver SDK. Never becomes a product decoder dependency.
+  rtc_amf_test_ffmpeg_include_dir = ""
+
+  # Opt-in Windows x265 Main/8-bit HEVC with a CRT-matched static library.
+  rtc_use_x265 = false
+  rtc_x265_include_dir = ""
+  rtc_x265_library = ""
+  rtc_x265_license_file = ""
+  rtc_x265_build_tests = false
+
   # Enable to use H265
   if (build_with_chromium) {
     rtc_use_h265 = enable_hevc_parser_and_hw_decoder
@@ -1130,13 +1159,13 @@ if (is_mac || is_ios) {
         # This is the fix. The mac framework now has a direct dependency on
         # the creation of the privacy manifest, just like the iOS version.
         deps += [
+          ":copy_framework_header_$this_target_name",
           ":copy_modulemap_$this_target_name",
           ":copy_umbrella_header_$this_target_name",
           ":create_bracket_include_headers_$this_target_name",
           ":create_privacy_manifest_$this_target_name",
           ":modulemap_$this_target_name",
           ":privacy_manifest_bundle_data_$this_target_name",
-          ":copy_framework_header_$this_target_name",
         ]
       }
     }

@@ -786,6 +786,13 @@ void AudioRtpSender::SetSend() {
   RTC_DCHECK_RUN_ON(signaling_thread_);
   RTC_DCHECK(!stopped_);
   RTC_DCHECK(can_send_track());
+
+  // Propagate is_external_source from AudioSourceInterface to the sink adapter.
+  // This ensures the voice engine knows not to mix ADM audio with external sources.
+  if (audio_track()->GetSource() && audio_track()->GetSource()->is_external_source()) {
+    sink_adapter_->set_is_external_source(true);
+  }
+
   if (!media_channel_) {
     RTC_LOG(LS_ERROR) << "SetAudioSend: No audio channel exists.";
     return;

@@ -846,7 +846,7 @@ enum ssl_verify_result_t OpenSSLAdapter::SSLVerifyInternal(SSL* ssl,
   std::vector<std::unique_ptr<SSLCertificate>> certs;
   for (size_t i = 0; i < sk_CRYPTO_BUFFER_num(chain); ++i) {
     certs.emplace_back(new BoringSSLCertificate(
-        bssl::UpRef(sk_CRYPTO_BUFFER_value(chain, i))));
+        bssl::UpRef(sk_CRYPTO_BUFFER_value(chain, i)), ssl));
   }
 
   SSLCertChain cert_chain(std::move(certs));
@@ -932,7 +932,7 @@ int OpenSSLAdapter::SSLVerifyInternal(int previous_status,
       RTC_LOG(LS_ERROR) << "Failed to allocate CRYPTO_BUFFER.";
       return previous_status;
     }
-    certs.emplace_back(new BoringSSLCertificate(std::move(crypto_buffer)));
+    certs.emplace_back(new BoringSSLCertificate(std::move(crypto_buffer), ssl));
 #else
     certs.emplace_back(new OpenSSLCertificate(x509_cert));
 #endif

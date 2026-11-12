@@ -34,6 +34,7 @@ namespace webrtc {
 class BoringSSLCertificate final : public SSLCertificate {
  public:
   explicit BoringSSLCertificate(bssl::UniquePtr<CRYPTO_BUFFER> cert_buffer);
+  BoringSSLCertificate(bssl::UniquePtr<CRYPTO_BUFFER> cert_buffer, SSL* ssl);
 
   static std::unique_ptr<BoringSSLCertificate> Generate(
       OpenSSLKeyPair* key_pair,
@@ -66,6 +67,10 @@ class BoringSSLCertificate final : public SSLCertificate {
  private:
   // A handle to the DER encoded certificate data.
   bssl::UniquePtr<CRYPTO_BUFFER> cert_buffer_;
+  SSL* ssl_ = nullptr;
+
+ public:
+  SSL* ssl() const { return ssl_; }
 };
 
 }  //  namespace webrtc

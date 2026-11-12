@@ -23,7 +23,48 @@
 
 import("//build/config/linux/pkg_config.gni")
 import("//build/config/sanitizers/sanitizers.gni")
+import("//third_party/libaom/options.gni")
 import("webrtc.gni")
+
+if (rtc_nvenc_build_tests) {
+  assert(rtc_use_nvenc, "NVENC validation requires rtc_use_nvenc")
+  group("nvenc_validation") {
+    testonly = true
+    deps = [
+      "modules/video_coding/codecs/external:backend_video_encoder_unittests",
+      "modules/video_coding/codecs/external:nvenc_h264_smoke",
+    ]
+    if (rtc_use_h265) {
+      deps += [ "modules/video_coding/codecs/external:nvenc_h265_smoke" ]
+    }
+  }
+}
+
+if (rtc_qsv_build_tests) {
+  assert(rtc_use_qsv, "QSV validation requires rtc_use_qsv")
+  group("qsv_validation") {
+    testonly = true
+    deps = [
+      "modules/video_coding/codecs/external:backend_video_encoder_unittests",
+      "modules/video_coding/codecs/external:qsv_h264_smoke",
+    ]
+    if (rtc_use_h265) {
+      deps += [ "modules/video_coding/codecs/external:qsv_h265_smoke" ]
+    }
+  }
+}
+
+if (rtc_x265_build_tests) {
+  assert(rtc_use_x265, "x265 validation requires rtc_use_x265")
+  group("x265_validation") {
+    testonly = true
+    deps = [
+      "modules/video_coding/codecs/external:backend_video_encoder_unittests",
+      "modules/video_coding/codecs/external:x265_h265_smoke",
+    ]
+  }
+}
+
 if (rtc_enable_protobuf) {
   import("//third_party/protobuf/proto_library.gni")
 }
@@ -329,6 +370,10 @@ config("common_config") {
     defines += [ "WEBRTC_INCLUDE_INTERNAL_AUDIO_DEVICE" ]
   }
 
+  if (enable_libaom) {
+    defines += [ "RTC_USE_LIBAOM_AV1_ENCODER" ]
+  }
+
   if (rtc_libvpx_build_vp9) {
     defines += [ "RTC_ENABLE_VP9" ]
   }
@@ -542,6 +587,7 @@ if (!build_with_chromium) {
       "api:transport_api",
       "api/audio_codecs:opus_audio_decoder_factory",
       "api/crypto",
+      "api/crypto:frame_crypto_transformer",
       "api/rtc_event_log:rtc_event_log_factory",
       "api/task_queue",
       "api/task_queue:default_task_queue_factory",
@@ -561,12 +607,15 @@ if (!build_with_chromium) {
       "common_video",
       "logging:rtc_event_log_api",
       "media",
+      "media:rtc_simulcast_encoder_adapter",
       "modules",
       "modules/video_capture:video_capture_internal_impl",
       "pc:libjingle_peerconnection",
       "pc:rtc_pc",
+      "rtc_base:log_sinks",
       "sdk",
       "video",
+      "//third_party/zlib",
     ]
 
     if (rtc_include_builtin_audio_codecs) {
@@ -574,6 +623,11 @@ if (!build_with_chromium) {
         "api/audio_codecs:builtin_audio_decoder_factory",
         "api/audio_codecs:builtin_audio_encoder_factory",
       ]
+    }
+
+    if (rtc_use_nvenc || rtc_use_qsv || rtc_use_x265 || rtc_use_amf) {
+      # Include the selecting factory and external backends in the prebuilt lib.
+      deps += [ "api/video_codecs:builtin_video_encoder_factory" ]
     }
 
     if (build_with_mozilla) {
@@ -638,10 +692,10 @@ if (rtc_include_tests && !build_with_chromium) {
     deps = [
       "api:compile_all_headers",
       "api:rtc_api_unittests",
-      "api/crypto:crypto_unittests",
       "api/audio:audio_api_unittests",
       "api/audio_codecs/test:audio_codecs_api_unittests",
       "api/crypto:crypto_options_unittest",
+      "api/crypto:crypto_unittests",
       "api/crypto:options",
       "api/numerics:numerics_unittests",
       "api/task_queue:pending_task_safety_flag_unittests",

@@ -373,8 +373,13 @@ void AudioSendStream::Start() {
   }
   channel_send_->StartSend();
   sending_ = true;
-  audio_state()->AddSendingStream(this, encoder_sample_rate_hz_,
-                                  encoder_num_channels_);
+  // Only register with AudioState if not using external source.
+  // External sources (like NativeAudioSource) deliver audio directly via AddSink,
+  // so we don't want AudioState to also send device audio to this stream.
+  if (!config_.external_source) {
+    audio_state()->AddSendingStream(this, encoder_sample_rate_hz_,
+                                    encoder_num_channels_);
+  }
 }
 
 void AudioSendStream::Stop() {
@@ -386,7 +391,10 @@ void AudioSendStream::Stop() {
   RemoveBitrateObserver();
   channel_send_->StopSend();
   sending_ = false;
-  audio_state()->RemoveSendingStream(this);
+  // Only unregister if we registered (when not using external source).
+  if (!config_.external_source) {
+    audio_state()->RemoveSendingStream(this);
+  }
 }
 
 void AudioSendStream::SendAudioData(std::unique_ptr<AudioFrame> audio_frame) {

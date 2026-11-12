@@ -559,6 +559,30 @@ rtc_library("rtc_internal_video_codecs") {
     ]
   }
 
+  if (rtc_use_nvenc) {
+    defines += [ "RTC_USE_NVENC" ]
+    deps += [ "../modules/video_coding/codecs/external:nvenc_video_encoder" ]
+  }
+
+  if (rtc_use_qsv) {
+    defines += [ "RTC_USE_QSV" ]
+    deps += [ "../modules/video_coding/codecs/external:qsv_video_encoder" ]
+  }
+
+  if (rtc_use_x265) {
+    defines += [ "RTC_USE_X265" ]
+    deps += [ "../modules/video_coding/codecs/external:x265_video_encoder" ]
+  }
+
+  if (rtc_use_amf) {
+    defines += [ "RTC_USE_AMF" ]
+    deps += [ "../modules/video_coding/codecs/external:amf_video_encoder" ]
+  }
+
+  if (rtc_use_nvenc || rtc_use_qsv || rtc_use_x265 || rtc_use_amf) {
+    deps += [ "../modules/video_coding/codecs/external:backend_video_encoder" ]
+  }
+
   if (rtc_include_dav1d_in_internal_decoder_factory) {
     deps += [ "../modules/video_coding/codecs/av1:dav1d_decoder" ]
   }

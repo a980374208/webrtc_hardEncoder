@@ -197,6 +197,7 @@ class VideoEncoderSoftwareFallbackWrapper final : public VideoEncoder {
   // Updates encoder with last observed parameters, such as callbacks, rates,
   // etc.
   void PrimeEncoder(VideoEncoder* encoder) const;
+  int32_t ReleaseEncoder(VideoEncoder* encoder);
 
   // Settings used in the last InitEncode call and used if a dynamic fallback to
   // software is required.
@@ -219,6 +220,7 @@ class VideoEncoderSoftwareFallbackWrapper final : public VideoEncoder {
   };
 
   EncoderState encoder_state_;
+  bool retirement_failed_ = false;
   const std::unique_ptr<VideoEncoder> encoder_;
   const std::unique_ptr<VideoEncoder> fallback_encoder_;
 
@@ -269,6 +271,17 @@ void VideoEncoderSoftwareFallbackWrapper::PrimeEncoder(
   }
 }
 
+int32_t VideoEncoderSoftwareFallbackWrapper::ReleaseEncoder(
+    VideoEncoder* encoder) {
+  const int32_t result = encoder->Release();
+  if (result != WEBRTC_VIDEO_CODEC_OK) {
+    retirement_failed_ = true;
+    RTC_LOG(LS_ERROR) << "[VESFW] encoder cleanup failed: "
+                      << WebRtcVideoCodecErrorToString(result);
+  }
+  return result;
+}
+
 bool VideoEncoderSoftwareFallbackWrapper::InitFallbackEncoder(bool is_forced) {
   RTC_LOG(LS_WARNING) << "[VESFW] " << __func__
                       << "(is_forced=" << (is_forced ? "true" : "false") << ")";
@@ -281,15 +294,19 @@ bool VideoEncoderSoftwareFallbackWrapper::InitFallbackEncoder(bool is_forced) {
     RTC_LOG(LS_ERROR)
         << "[VESFW] software-encoder fallback initialization failed with"
         << " error code: " << WebRtcVideoCodecErrorToString(ret);
-    fallback_encoder_->Release();
+    ReleaseEncoder(fallback_encoder_.get());
     return false;
   }
 
   if (encoder_state_ == EncoderState::kMainEncoderUsed) {
-    // Since we're switching to the fallback encoder, Release the real encoder.
-    // It may be re-initialized via InitEncode later, and it will continue to
-    // get Set calls for rates and channel parameters in the meantime.
-    encoder_->Release();
+    // Confirm retirement before software becomes the effective active encoder.
+    const int close_result = ReleaseEncoder(encoder_.get());
+    if (close_result != WEBRTC_VIDEO_CODEC_OK) {
+      RTC_LOG(LS_ERROR) << "[VESFW] hardware cleanup failed before fallback: "
+                        << WebRtcVideoCodecErrorToString(close_result);
+      ReleaseEncoder(fallback_encoder_.get());
+      return false;
+    }
   }
 
   if (is_forced) {
@@ -303,6 +320,9 @@ bool VideoEncoderSoftwareFallbackWrapper::InitFallbackEncoder(bool is_forced) {
 
 void VideoEncoderSoftwareFallbackWrapper::SetFecControllerOverride(
     FecControllerOverride* fec_controller_override) {
+  if (retirement_failed_) {
+    return;
+  }
   // It is important that only one of those would ever interact with the
   // `fec_controller_override` at a given time. This is the responsibility
   // of `this` to maintain.
@@ -314,6 +334,12 @@ void VideoEncoderSoftwareFallbackWrapper::SetFecControllerOverride(
 int32_t VideoEncoderSoftwareFallbackWrapper::InitEncode(
     const VideoCodec* codec_settings,
     const VideoEncoder::Settings& settings) {
+  if (!codec_settings) {
+    return WEBRTC_VIDEO_CODEC_ERR_PARAMETER;
+  }
+  if (retirement_failed_) {
+    return WEBRTC_VIDEO_CODEC_ERROR;
+  }
   RTC_LOG(LS_INFO) << "[VESFW] " << __func__
                    << "(codec=" << codec_settings->ToString()
                    << ", settings={number_of_cores: "
@@ -335,12 +361,20 @@ int32_t VideoEncoderSoftwareFallbackWrapper::InitEncode(
     PrimeEncoder(current_encoder());
     return WEBRTC_VIDEO_CODEC_OK;
   }
+  if (retirement_failed_) {
+    return WEBRTC_VIDEO_CODEC_ERROR;
+  }
 
   int32_t ret = encoder_->InitEncode(codec_settings, settings);
   if (ret == WEBRTC_VIDEO_CODEC_OK) {
     encoder_state_ = EncoderState::kMainEncoderUsed;
     PrimeEncoder(current_encoder());
     return ret;
+  }
+  // Failed initialization may still own resources. Retire it before a software
+  // initialization, or before returning an unsupported configuration result.
+  if (ReleaseEncoder(encoder_.get()) != WEBRTC_VIDEO_CODEC_OK) {
+    return WEBRTC_VIDEO_CODEC_ERROR;
   }
   if (ret == WEBRTC_VIDEO_CODEC_ERR_SIMULCAST_PARAMETERS_NOT_SUPPORTED) {
     return ret;
@@ -363,22 +397,29 @@ int32_t VideoEncoderSoftwareFallbackWrapper::InitEncode(
 
 int32_t VideoEncoderSoftwareFallbackWrapper::RegisterEncodeCompleteCallback(
     EncodedImageCallback* callback) {
+  if (retirement_failed_) {
+    return WEBRTC_VIDEO_CODEC_ERROR;
+  }
   callback_ = callback;
   return current_encoder()->RegisterEncodeCompleteCallback(callback);
 }
 
 int32_t VideoEncoderSoftwareFallbackWrapper::Release() {
   if (encoder_state_ == EncoderState::kUninitialized) {
-    return WEBRTC_VIDEO_CODEC_OK;
+    return retirement_failed_ ? WEBRTC_VIDEO_CODEC_ERROR
+                              : WEBRTC_VIDEO_CODEC_OK;
   }
-  int32_t ret = current_encoder()->Release();
+  int32_t ret = ReleaseEncoder(current_encoder());
   encoder_state_ = EncoderState::kUninitialized;
-  return ret;
+  return retirement_failed_ ? WEBRTC_VIDEO_CODEC_ERROR : ret;
 }
 
 int32_t VideoEncoderSoftwareFallbackWrapper::Encode(
     const VideoFrame& frame,
     const std::vector<VideoFrameType>* frame_types) {
+  if (retirement_failed_) {
+    return WEBRTC_VIDEO_CODEC_ERROR;
+  }
   switch (encoder_state_) {
     case EncoderState::kUninitialized:
       return WEBRTC_VIDEO_CODEC_ERROR;
@@ -435,23 +476,35 @@ int32_t VideoEncoderSoftwareFallbackWrapper::EncodeWithMainEncoder(
 
 void VideoEncoderSoftwareFallbackWrapper::SetRates(
     const RateControlParameters& parameters) {
+  if (retirement_failed_) {
+    return;
+  }
   rate_control_parameters_ = parameters;
   return current_encoder()->SetRates(parameters);
 }
 
 void VideoEncoderSoftwareFallbackWrapper::OnPacketLossRateUpdate(
     float packet_loss_rate) {
+  if (retirement_failed_) {
+    return;
+  }
   packet_loss_ = packet_loss_rate;
   current_encoder()->OnPacketLossRateUpdate(packet_loss_rate);
 }
 
 void VideoEncoderSoftwareFallbackWrapper::OnRttUpdate(int64_t rtt_ms) {
+  if (retirement_failed_) {
+    return;
+  }
   rtt_ = rtt_ms;
   current_encoder()->OnRttUpdate(rtt_ms);
 }
 
 void VideoEncoderSoftwareFallbackWrapper::OnLossNotification(
     const LossNotification& loss_notification) {
+  if (retirement_failed_) {
+    return;
+  }
   loss_notification_ = loss_notification;
   current_encoder()->OnLossNotification(loss_notification);
 }
@@ -502,6 +555,8 @@ bool VideoEncoderSoftwareFallbackWrapper::TryInitForcedFallbackEncoder() {
     if (encoder_->InitEncode(&codec_settings_, encoder_settings_.value()) ==
         WEBRTC_VIDEO_CODEC_OK) {
       encoder_state_ = EncoderState::kMainEncoderUsed;
+    } else if (ReleaseEncoder(encoder_.get()) != WEBRTC_VIDEO_CODEC_OK) {
+      return false;
     }
 
     if (encoder_state_ == EncoderState::kMainEncoderUsed &&
@@ -519,7 +574,14 @@ bool VideoEncoderSoftwareFallbackWrapper::TryInitForcedFallbackEncoder() {
         if (encoder_state_ == EncoderState::kMainEncoderUsed) {
           // Main encoder initialized but does not support temporal layers,
           // release it again.
-          encoder_->Release();
+          const int close_result = ReleaseEncoder(encoder_.get());
+          if (close_result != WEBRTC_VIDEO_CODEC_OK) {
+            ReleaseEncoder(fallback_encoder_.get());
+            RTC_LOG(LS_ERROR)
+                << "[VESFW] hardware cleanup failed before temporal fallback: "
+                << WebRtcVideoCodecErrorToString(close_result);
+            return false;
+          }
         }
         encoder_state_ = EncoderState::kForcedFallback;
         RTC_LOG(LS_INFO)
@@ -528,8 +590,13 @@ bool VideoEncoderSoftwareFallbackWrapper::TryInitForcedFallbackEncoder() {
       } else {
         // Fallback encoder intialization succeeded, but it does not support
         // temporal layers either - release it.
-        fallback_encoder_->Release();
+        if (ReleaseEncoder(fallback_encoder_.get()) != WEBRTC_VIDEO_CODEC_OK) {
+          return false;
+        }
       }
+    } else if (ReleaseEncoder(fallback_encoder_.get()) !=
+               WEBRTC_VIDEO_CODEC_OK) {
+      return false;
     }
 
     if (encoder_state_ == EncoderState::kMainEncoderUsed) {

@@ -352,15 +352,16 @@ TEST_F(VideoEncoderSoftwareFallbackWrapperTest,
 
   UtilizeFallbackEncoder();
 
-  // One successful InitEncode(), one failed.
+  // One successful InitEncode(), one failed. Both attempts need cleanup:
+  // Release before reinitialization, then Release after the failed HW init.
   EXPECT_EQ(2, fake_encoder_->init_encode_count_);
-  EXPECT_EQ(1, fake_encoder_->release_count_);
+  EXPECT_EQ(2, fake_encoder_->release_count_);
 
   EXPECT_EQ(WEBRTC_VIDEO_CODEC_OK, fallback_wrapper_->Release());
 
   // No extra release when the fallback is released.
   EXPECT_EQ(2, fake_encoder_->init_encode_count_);
-  EXPECT_EQ(1, fake_encoder_->release_count_);
+  EXPECT_EQ(2, fake_encoder_->release_count_);
 }
 
 TEST_F(VideoEncoderSoftwareFallbackWrapperTest,
@@ -894,6 +895,42 @@ class PreferTemporalLayersFallbackTest : public ::testing::Test {
     }
   }
 
+  void ExpectRetirementFailureIsSticky() {
+    // Failed retirement must not reinitialize either encoder or forward new
+    // frames/rates/notifications, even if a subsequent hardware init could
+    // succeed. Release must keep the earlier cleanup failure visible.
+    EXPECT_CALL(*hw_, InitEncode(_, _)).Times(0);
+    EXPECT_CALL(*sw_, InitEncode(_, _)).Times(0);
+    EXPECT_CALL(*hw_, Encode).Times(0);
+    EXPECT_CALL(*sw_, Encode).Times(0);
+    EXPECT_CALL(*hw_, SetRates).Times(0);
+    EXPECT_CALL(*sw_, SetRates).Times(0);
+    EXPECT_CALL(*hw_, OnPacketLossRateUpdate).Times(0);
+    EXPECT_CALL(*sw_, OnPacketLossRateUpdate).Times(0);
+    EXPECT_CALL(*hw_, OnRttUpdate).Times(0);
+    EXPECT_CALL(*sw_, OnRttUpdate).Times(0);
+    EXPECT_CALL(*hw_, OnLossNotification).Times(0);
+    EXPECT_CALL(*sw_, OnLossNotification).Times(0);
+
+    EXPECT_EQ(WEBRTC_VIDEO_CODEC_ERROR,
+              wrapper_->InitEncode(&codec_settings, kSettings));
+    auto buffer = I420Buffer::Create(kWidth, kHeight);
+    I420Buffer::SetBlack(buffer.get());
+    const auto frame =
+        VideoFrame::Builder().set_video_frame_buffer(buffer).build();
+    EXPECT_EQ(WEBRTC_VIDEO_CODEC_ERROR, wrapper_->Encode(frame, nullptr));
+    wrapper_->SetRates(VideoEncoder::RateControlParameters());
+    wrapper_->OnPacketLossRateUpdate(0.1f);
+    wrapper_->OnRttUpdate(10);
+    wrapper_->OnLossNotification(
+        {.timestamp_of_last_decodable = 0,
+         .timestamp_of_last_received = 1,
+         .dependencies_of_last_received_decodable = true,
+         .last_received_decodable = true});
+    EXPECT_EQ(WEBRTC_VIDEO_CODEC_ERROR, wrapper_->Release());
+    EXPECT_EQ(WEBRTC_VIDEO_CODEC_ERROR, wrapper_->Release());
+  }
+
   VideoCodec codec_settings;
   ::testing::NiceMock<MockVideoEncoder>* sw_;
   ::testing::NiceMock<MockVideoEncoder>* hw_;
@@ -946,6 +983,58 @@ TEST_F(PreferTemporalLayersFallbackTest, UsesFallbackWhenLayersAreUndefined) {
   EXPECT_EQ(WEBRTC_VIDEO_CODEC_OK,
             wrapper_->InitEncode(&codec_settings, kSettings));
   EXPECT_EQ(wrapper_->GetEncoderInfo().implementation_name, "sw");
+}
+
+TEST_F(PreferTemporalLayersFallbackTest,
+       FailedHardwareProbeRetirementPreventsForcedSoftwareSuccess) {
+  codec_settings.VP8()->numberOfTemporalLayers = 2;
+  SetSupportsLayers(&sw_info_, true);
+  EXPECT_CALL(*hw_, InitEncode(_, _))
+      .WillOnce(Return(WEBRTC_VIDEO_CODEC_ERROR));
+  EXPECT_CALL(*hw_, Release())
+      .Times(::testing::AtLeast(1))
+      .WillRepeatedly(Return(WEBRTC_VIDEO_CODEC_ERROR));
+  EXPECT_CALL(*sw_, Encode).Times(0);
+
+  EXPECT_NE(WEBRTC_VIDEO_CODEC_OK,
+            wrapper_->InitEncode(&codec_settings, kSettings));
+  ExpectRetirementFailureIsSticky();
+}
+
+TEST_F(PreferTemporalLayersFallbackTest,
+       FailedSoftwareProbeRetirementPreventsHardwareSuccess) {
+  codec_settings.VP8()->numberOfTemporalLayers = 2;
+  SetSupportsLayers(&hw_info_, false);
+  EXPECT_CALL(*hw_, InitEncode(_, _)).WillOnce(Return(WEBRTC_VIDEO_CODEC_OK));
+  EXPECT_CALL(*sw_, InitEncode(_, _))
+      .WillOnce(Return(WEBRTC_VIDEO_CODEC_ERROR));
+  EXPECT_CALL(*sw_, Release()).WillOnce(Return(WEBRTC_VIDEO_CODEC_ERROR));
+
+  EXPECT_NE(WEBRTC_VIDEO_CODEC_OK,
+            wrapper_->InitEncode(&codec_settings, kSettings));
+  ExpectRetirementFailureIsSticky();
+}
+
+TEST_F(PreferTemporalLayersFallbackTest,
+       UnsupportedSoftwareLayersRetirementFailureStaysSticky) {
+  codec_settings.VP8()->numberOfTemporalLayers = 2;
+  SetSupportsLayers(&hw_info_, false);
+  SetSupportsLayers(&sw_info_, false);
+  EXPECT_CALL(*hw_, InitEncode(_, _)).WillOnce(Return(WEBRTC_VIDEO_CODEC_OK));
+  EXPECT_CALL(*sw_, InitEncode(_, _)).WillOnce(Return(WEBRTC_VIDEO_CODEC_OK));
+  EXPECT_CALL(*sw_, Release()).WillOnce(Return(WEBRTC_VIDEO_CODEC_ERROR));
+
+  EXPECT_NE(WEBRTC_VIDEO_CODEC_OK,
+            wrapper_->InitEncode(&codec_settings, kSettings));
+  ExpectRetirementFailureIsSticky();
+}
+
+TEST_F(PreferTemporalLayersFallbackTest, NullSettingsDoNotInitializeEncoders) {
+  EXPECT_CALL(*hw_, InitEncode(_, _)).Times(0);
+  EXPECT_CALL(*sw_, InitEncode(_, _)).Times(0);
+  EXPECT_EQ(WEBRTC_VIDEO_CODEC_ERR_PARAMETER,
+            wrapper_->InitEncode(nullptr, kSettings));
+  EXPECT_EQ(WEBRTC_VIDEO_CODEC_OK, wrapper_->Release());
 }
 
 TEST_F(PreferTemporalLayersFallbackTest, PrimesEncoderOnSwitch) {
