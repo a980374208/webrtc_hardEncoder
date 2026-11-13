@@ -186,6 +186,20 @@ declare_args() {
   # Standalone focused gates, independent of rtc_include_tests.
   rtc_nvenc_build_tests = false
 
+  # Separate Linux CUDA implementation. Never enables a Windows backend or
+  # changes the default selecting factory. Used by the explicit H264 probe API.
+  rtc_use_linux_nvenc = false
+  rtc_linux_nvenc_include_dir = ""
+  rtc_linux_cuda_include_dir = ""
+  rtc_linux_nvenc_build_tests = false
+
+  # Separate Linux backends never enter the Windows D3D11 source graph.
+  rtc_use_linux_qsv = false
+  rtc_linux_qsv_include_dir = ""
+  rtc_linux_qsv_build_tests = false
+  rtc_use_linux_vaapi = false
+  rtc_linux_vaapi_build_tests = false
+
   # Opt-in Windows QSV H.264/H.265 via a CRT-compatible static oneVPL dispatcher.
   rtc_use_qsv = false
   rtc_qsv_include_dir = ""

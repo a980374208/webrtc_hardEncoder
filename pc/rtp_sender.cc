@@ -795,9 +795,9 @@ void AudioRtpSender::SetSend() {
 
   // Propagate is_external_source from AudioSourceInterface to the sink adapter.
   // This ensures the voice engine knows not to mix ADM audio with external sources.
-  if (audio_track()->GetSource() && audio_track()->GetSource()->is_external_source()) {
-    sink_adapter_->set_is_external_source(true);
-  }
+  sink_adapter_->set_is_external_source(
+      audio_track()->GetSource() &&
+      audio_track()->GetSource()->is_external_source());
 
   if (!media_channel_) {
     RTC_LOG(LS_ERROR) << "SetAudioSend: No audio channel exists.";
@@ -878,6 +878,26 @@ VideoRtpSender::~VideoRtpSender() {
   Stop();
 }
 
+#if defined(WEBRTC_LINUX_ENCODER_FACTORY_BINDING)
+RTCError VideoRtpSender::SetVideoEncoderFactory(
+    std::shared_ptr<VideoEncoderFactory> factory) {
+  RTC_DCHECK_RUN_ON(signaling_thread_);
+  if (stopped_ || ssrc_ != 0 || video_encoder_factory_committed_) {
+    return RTCError(RTCErrorType::INVALID_STATE,
+                    "Encoder factory must be bound before SSRC assignment");
+  }
+  video_encoder_factory_ = std::move(factory);
+  return RTCError::OK();
+}
+
+void VideoRtpSender::Stop() {
+  RtpSenderBase::Stop();
+  // ClearSend has detached the source. A native stream that still exists in
+  // its channel keeps a separate lease until its encoder is destroyed.
+  video_encoder_factory_.reset();
+}
+#endif
+
 void VideoRtpSender::OnChanged() {
   RTC_DCHECK_RUN_ON(signaling_thread_);
   TRACE_EVENT0("webrtc", "VideoRtpSender::OnChanged");
@@ -957,7 +977,17 @@ void VideoRtpSender::SetSend() {
       options.is_screencast = true;
       break;
   }
+#if defined(WEBRTC_LINUX_ENCODER_FACTORY_BINDING)
+  video_encoder_factory_committed_ = true;
+#endif
   bool success = worker_thread_->BlockingCall([&] {
+#if defined(WEBRTC_LINUX_ENCODER_FACTORY_BINDING)
+    if (video_encoder_factory_) {
+      const auto binding = video_media_channel()->SetVideoEncoderFactory(
+          ssrc_, video_encoder_factory_);
+      if (!binding.ok()) return false;
+    }
+#endif
     return video_media_channel()->SetVideoSend(ssrc_, &options,
                                                video_track().get());
   });

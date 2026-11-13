@@ -58,12 +58,17 @@ class AudioState : public webrtc::AudioState {
   void AddReceivingStream(webrtc::AudioReceiveStreamInterface* stream);
   void RemoveReceivingStream(webrtc::AudioReceiveStreamInterface* stream);
 
+  // Only native device senders are registered here. The default keeps direct
+  // AudioState users source-compatible; AudioSendStream passes its mute state.
   void AddSendingStream(webrtc::AudioSendStream* stream,
                         int sample_rate_hz,
-                        size_t num_channels);
+                        size_t num_channels,
+                        bool muted = false);
   void RemoveSendingStream(webrtc::AudioSendStream* stream);
+  void SetSendingStreamMuted(webrtc::AudioSendStream* stream, bool muted);
 
  private:
+  void UpdateRecordingState(bool force_stop = false);
   void UpdateAudioTransportWithSendingStreams();
   void UpdateNullAudioPollerState() RTC_RUN_ON(&thread_checker_);
 
@@ -88,6 +93,7 @@ class AudioState : public webrtc::AudioState {
   struct StreamProperties {
     int sample_rate_hz = 0;
     size_t num_channels = 0;
+    bool muted = false;
   };
   std::map<webrtc::AudioSendStream*, StreamProperties> sending_streams_;
 };

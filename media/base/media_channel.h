@@ -964,6 +964,15 @@ class VideoMediaSendChannelInterface : public MediaSendChannelInterface {
   virtual bool SetVideoSend(uint32_t ssrc,
                             const VideoOptions* options,
                             VideoSourceInterface<VideoFrame>* source) = 0;
+#if defined(WEBRTC_LINUX_ENCODER_FACTORY_BINDING)
+  // Worker-only. Bind before a source is attached; an existing equal binding
+  // is idempotent. Unsupported media engines fail closed.
+  virtual RTCError SetVideoEncoderFactory(
+      uint32_t /* ssrc */, std::shared_ptr<VideoEncoderFactory> /* factory */) {
+    return RTCError(RTCErrorType::UNSUPPORTED_OPERATION,
+                    "Per-stream video encoder factory is unsupported");
+  }
+#endif
   // Cause generation of a keyframe for `ssrc` on a sending channel.
   virtual void GenerateSendKeyFrame(uint32_t ssrc,
                                     const std::vector<std::string>& rids) = 0;

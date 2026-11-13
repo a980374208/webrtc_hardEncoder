@@ -443,6 +443,11 @@ class VideoRtpSender : public RtpSenderBase {
 
   scoped_refptr<DtmfSenderInterface> GetDtmfSender() const override;
   RTCError GenerateKeyFrame(const std::vector<std::string>& rids) override;
+#if defined(WEBRTC_LINUX_ENCODER_FACTORY_BINDING)
+  RTCError SetVideoEncoderFactory(
+      std::shared_ptr<VideoEncoderFactory> factory) override;
+  void Stop() override;
+#endif
 
  protected:
   VideoRtpSender(const Environment& env,
@@ -465,6 +470,12 @@ class VideoRtpSender : public RtpSenderBase {
         static_cast<VideoTrackInterface*>(track_.get()));
   }
 
+#if defined(WEBRTC_LINUX_ENCODER_FACTORY_BINDING)
+  // Signaling-owned immutable binding once a source can reach a native stream.
+  // Each native stream also owns its factory independently across SSRC changes.
+  std::shared_ptr<VideoEncoderFactory> video_encoder_factory_;
+  bool video_encoder_factory_committed_ = false;
+#endif
   VideoTrackInterface::ContentHint cached_track_content_hint_ =
       VideoTrackInterface::ContentHint::kNone;
 };

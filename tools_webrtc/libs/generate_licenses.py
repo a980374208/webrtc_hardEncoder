@@ -213,6 +213,12 @@ class LicenseBuilder:
 
     def _get_third_party_libraries(self, buildfile_dir, target):
         license_json = LicenseBuilder._run_gn(buildfile_dir, target)
+        # Strip any non-JSON content (e.g., GN warnings) before the actual JSON.
+        # GN may output warnings before the JSON when certain build args trigger
+        # deprecation notices.
+        json_start = license_json.find('{')
+        if json_start > 0:
+            license_json = license_json[json_start:]
         try:
             output = json.loads(license_json)
         except:

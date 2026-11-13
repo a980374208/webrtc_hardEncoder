@@ -3221,3 +3221,29 @@ if (rtc_include_tests && !build_with_chromium) {
     }
   }
 }
+
+# Publication-owned encoder factory lifetime regression. Linux hardware builds
+# keep this executable available without the monolithic gtest test graph.
+if (is_linux &&
+    (rtc_use_linux_nvenc || rtc_use_linux_qsv || rtc_use_linux_vaapi)) {
+  rtc_executable("linux_sender_factory_binding_tests") {
+    testonly = true
+    sources = [ "linux_sender_factory_binding_unittest.cc" ]
+    deps = [
+      ":rtp_sender",
+      ":video_track",
+      ":video_track_source",
+      "../api:make_ref_counted",
+      "../api/environment:environment_factory",
+      "../api/video:builtin_video_bitrate_allocator_factory",
+      "../api/video:video_frame",
+      "../call",
+      "../call:call_interfaces",
+      "../media:rtc_audio_video",
+      "../media:rtc_media_base",
+      "../modules/video_coding:webrtc_vp8",
+      "../rtc_base:logging",
+      "../rtc_base:threading",
+    ]
+  }
+}

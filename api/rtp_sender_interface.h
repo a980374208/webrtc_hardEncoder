@@ -130,6 +130,18 @@ class RTC_EXPORT RtpSenderInterface : public RefCountInterface,
       std::unique_ptr<VideoEncoderFactory::EncoderSelectorInterface>
           encoder_selector) = 0;
 
+#if defined(WEBRTC_LINUX_ENCODER_FACTORY_BINDING)
+  // Linux publication-local encoder factory. Call on the signaling sequence
+  // after AddTransceiver and before an SSRC is assigned. Existing native
+  // streams retain their own shared ownership through encoder destruction.
+  // Audio senders and implementations without this extension reject it.
+  virtual RTCError SetVideoEncoderFactory(
+      std::shared_ptr<VideoEncoderFactory> /* factory */) {
+    return RTCError(RTCErrorType::UNSUPPORTED_OPERATION,
+                    "Per-sender video encoder factory is unsupported");
+  }
+#endif
+
   // Default implementation of SetFrameTransformer.
   // TODO: bugs.webrtc.org/15929 - remove when all implementations are good
   void SetFrameTransformer(scoped_refptr<FrameTransformerInterface>

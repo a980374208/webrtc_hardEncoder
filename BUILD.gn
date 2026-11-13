@@ -348,6 +348,13 @@ config("common_config") {
   cflags_objc = []
   defines = []
 
+  if (is_linux &&
+      (rtc_use_linux_nvenc || rtc_use_linux_qsv || rtc_use_linux_vaapi)) {
+    # Public ABI extension for publication-owned factory selection. Consumers
+    # must use the same macro from the package profile; Windows is unchanged.
+    defines += [ "WEBRTC_LINUX_ENCODER_FACTORY_BINDING=1" ]
+  }
+
   if (rtc_enable_protobuf) {
     defines += [ "WEBRTC_ENABLE_PROTOBUF=1" ]
   } else {
@@ -623,6 +630,21 @@ if (!build_with_chromium) {
         "api/audio_codecs:builtin_audio_decoder_factory",
         "api/audio_codecs:builtin_audio_encoder_factory",
       ]
+    }
+
+    if (rtc_use_linux_nvenc) {
+      # Explicit hardware-only API; no new probing in the default factory.
+      deps +=
+          [ "modules/video_coding/codecs/external:linux_nvenc_video_encoder" ]
+    }
+    if (rtc_use_linux_qsv) {
+      assert(is_linux)
+      deps += [ "modules/video_coding/codecs/external:linux_qsv_video_encoder" ]
+    }
+    if (rtc_use_linux_vaapi) {
+      assert(is_linux)
+      deps +=
+          [ "modules/video_coding/codecs/external:linux_vaapi_video_encoder" ]
     }
 
     if (rtc_use_nvenc || rtc_use_qsv || rtc_use_x265 || rtc_use_amf) {

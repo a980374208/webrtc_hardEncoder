@@ -60,6 +60,12 @@
 #include "rtc_base/thread_annotations.h"
 #include "rtc_base/time_utils.h"
 
+// The pinned PipeWire/SPA macros compare unsigned interface versions with
+// signed literal zero. Clang 22 diagnoses those system-header expansions here.
+#if defined(__clang__)
+#pragma clang diagnostic ignored "-Wsign-compare"
+#endif
+
 namespace webrtc {
 
 const int kBytesPerPixel = 4;
@@ -70,13 +76,6 @@ constexpr int CursorMetaSize(int w, int h) {
   return (sizeof(struct spa_meta_cursor) + sizeof(struct spa_meta_bitmap) +
           w * h * kCursorBpp);
 }
-
-constexpr PipeWireVersion kDmaBufModifierMinVersion = {.major = 0,
-                                                       .minor = 3,
-                                                       .micro = 33};
-constexpr PipeWireVersion kDropSingleModifierMinVersion = {.major = 0,
-                                                           .minor = 3,
-                                                           .micro = 40};
 
 class SharedScreenCastStreamPrivate {
  public:
@@ -543,6 +542,9 @@ bool SharedScreenCastStreamPrivate::StartScreenCastStream(
         spa_pod_builder{.data = buffer, .size = sizeof(buffer)};
 
     std::vector<const spa_pod*> params;
+    // GCC 10 libstdc++ cannot constant-initialize the std::string member.
+    const PipeWireVersion kDmaBufModifierMinVersion = {
+        .major = 0, .minor = 3, .micro = 33};
     const bool has_required_pw_client_version =
         pw_client_version_ >= kDmaBufModifierMinVersion;
     const bool has_required_pw_server_version =
@@ -1026,6 +1028,8 @@ bool SharedScreenCastStreamPrivate::ProcessDMABuffer(
     RTC_LOG(LS_ERROR) << "Dropping DMA-BUF modifier: " << modifier_
                       << " and trying to renegotiate stream parameters";
 
+    const PipeWireVersion kDropSingleModifierMinVersion = {
+        .major = 0, .minor = 3, .micro = 40};
     if (pw_server_version_ >= kDropSingleModifierMinVersion) {
       std::erase(modifiers_, modifier_);
     } else {

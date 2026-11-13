@@ -117,50 +117,21 @@ void AudioState::RemoveReceivingStream(
 void AudioState::SetRecording(bool enabled) {
   RTC_LOG(LS_INFO) << "SetRecording(" << enabled << ")";
   RTC_DCHECK_RUN_ON(&thread_checker_);
-  auto* adm = config_.audio_device_module.get();
-  if (enabled) {
-    if (!sending_streams_.empty()) {
-      if (!adm->Recording()) {
-        if (adm->InitRecording() == 0) {
-          adm->StartRecording();
-        }
-      }
-    }
-  } else {
-    // Disable recording.
-    adm->StopRecording();
-  }
   recording_enabled_ = enabled;
+  UpdateRecordingState(!enabled);
 }
 
 void AudioState::AddSendingStream(webrtc::AudioSendStream* stream,
                                   int sample_rate_hz,
-                                  size_t num_channels) {
+                                  size_t num_channels,
+                                  bool muted) {
   RTC_DCHECK_RUN_ON(&thread_checker_);
   auto& properties = sending_streams_[stream];
   properties.sample_rate_hz = sample_rate_hz;
   properties.num_channels = num_channels;
+  properties.muted = muted;
   UpdateAudioTransportWithSendingStreams();
-
-  // Make sure recording is initialized; start recording if enabled.
-  auto* adm = config_.audio_device_module.get();
-  if (!adm->Recording()) {
-    if (adm->InitRecording() == 0) {
-      if (recording_enabled_) {
-#if defined(WEBRTC_WIN)
-        if (adm->BuiltInAECIsAvailable() && !adm->Playing()) {
-          if (!adm->PlayoutIsInitialized()) {
-            adm->InitPlayout();
-          }
-          adm->StartPlayout();
-        }
-#endif
-        adm->StartRecording();
-      }
-    } else {
-      RTC_DLOG_F(LS_ERROR) << "Failed to initialize recording.";
-    }
-  }
+  UpdateRecordingState();
 }
 
 void AudioState::RemoveSendingStream(webrtc::AudioSendStream* stream) {
@@ -168,9 +139,62 @@ void AudioState::RemoveSendingStream(webrtc::AudioSendStream* stream) {
   auto count = sending_streams_.erase(stream);
   RTC_DCHECK_EQ(1, count);
   UpdateAudioTransportWithSendingStreams();
-  if (sending_streams_.empty()) {
-    config_.audio_device_module->StopRecording();
+  UpdateRecordingState(sending_streams_.empty());
+}
+
+void AudioState::SetSendingStreamMuted(webrtc::AudioSendStream* stream,
+                                       bool muted) {
+  RTC_DCHECK_RUN_ON(&thread_checker_);
+  auto it = sending_streams_.find(stream);
+  RTC_DCHECK(it != sending_streams_.end());
+  if (it == sending_streams_.end()) {
+    return;
   }
+  it->second.muted = muted;
+  UpdateRecordingState();
+}
+
+void AudioState::UpdateRecordingState(bool force_stop) {
+  RTC_DCHECK_RUN_ON(&thread_checker_);
+  auto* adm = config_.audio_device_module.get();
+  const bool has_native_senders = !sending_streams_.empty();
+  const bool all_muted =
+      std::all_of(sending_streams_.begin(), sending_streams_.end(),
+                  [](const auto& kv) { return kv.second.muted; });
+  if (config_.audio_processing) {
+    config_.audio_processing->set_output_will_be_muted(
+        has_native_senders && (!recording_enabled_ || all_muted));
+  }
+
+  if (!recording_enabled_ || !has_native_senders ||
+      (all_muted && adm->IsStopOnMuteModeEnabled())) {
+    // Explicit disable and final removal always release the device, including
+    // a device whose failed initialization left partial resources behind.
+    if (force_stop || adm->Recording() || adm->RecordingIsInitialized()) {
+      adm->StopRecording();
+    }
+    return;
+  }
+
+  if (!adm->IsStopOnMuteModeEnabled()) {
+    adm->SetMicrophoneMute(all_muted);
+  }
+  if (adm->Recording()) {
+    return;
+  }
+  if (adm->InitRecording() != 0) {
+    RTC_DLOG_F(LS_ERROR) << "Failed to initialize recording.";
+    return;
+  }
+#if defined(WEBRTC_WIN)
+  if (adm->BuiltInAECIsAvailable() && !adm->Playing()) {
+    if (!adm->PlayoutIsInitialized()) {
+      adm->InitPlayout();
+    }
+    adm->StartPlayout();
+  }
+#endif
+  adm->StartRecording();
 }
 
 void AudioState::SetStereoChannelSwapping(bool enable) {

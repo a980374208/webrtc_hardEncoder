@@ -204,6 +204,10 @@ class WebRtcVideoSendChannel : public MediaChannelUtil,
   bool SetVideoSend(uint32_t ssrc,
                     const VideoOptions* options,
                     VideoSourceInterface<VideoFrame>* source) override;
+#if defined(WEBRTC_LINUX_ENCODER_FACTORY_BINDING)
+  RTCError SetVideoEncoderFactory(
+      uint32_t ssrc, std::shared_ptr<VideoEncoderFactory> factory) override;
+#endif
   bool AddSendStream(const StreamParams& sp) override;
   bool RemoveSendStream(uint32_t ssrc) override;
   void FillBitrateInfo(BandwidthEstimationInfo* bwe_info) override;
@@ -336,6 +340,11 @@ class WebRtcVideoSendChannel : public MediaChannelUtil,
     bool SetVideoSend(const VideoOptions* options,
                       VideoSourceInterface<VideoFrame>* source);
 
+#if defined(WEBRTC_LINUX_ENCODER_FACTORY_BINDING)
+    RTCError SetVideoEncoderFactory(
+        std::shared_ptr<VideoEncoderFactory> factory);
+#endif
+
     // note: The encoder_selector object must remain valid for the lifetime of
     // the MediaChannel, unless replaced.
     void SetEncoderSelector(
@@ -403,6 +412,12 @@ class WebRtcVideoSendChannel : public MediaChannelUtil,
     const bool enable_cpu_overuse_detection_;
     VideoSourceInterface<VideoFrame>* source_ RTC_GUARDED_BY(&thread_checker_);
 
+#if defined(WEBRTC_LINUX_ENCODER_FACTORY_BINDING)
+    // Declared before stream_. The destructor explicitly destroys the native
+    // stream/encoder before this shared factory can be released.
+    std::shared_ptr<VideoEncoderFactory> owned_encoder_factory_
+        RTC_GUARDED_BY(&thread_checker_);
+#endif
     VideoSendStream* stream_ RTC_GUARDED_BY(&thread_checker_);
 
     // Contains settings that are the same for all streams in the MediaChannel,

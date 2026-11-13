@@ -37,6 +37,11 @@ namespace webrtc {
 BEGIN_PRIMARY_PROXY_MAP(RtpSender)
 PROXY_PRIMARY_THREAD_DESTRUCTOR()
 PROXY_METHOD1(bool, SetTrack, MediaStreamTrackInterface*)
+#if defined(WEBRTC_LINUX_ENCODER_FACTORY_BINDING)
+PROXY_METHOD1(RTCError,
+              SetVideoEncoderFactory,
+              std::shared_ptr<VideoEncoderFactory>)
+#endif
 PROXY_CONSTMETHOD0(scoped_refptr<MediaStreamTrackInterface>, track)
 PROXY_CONSTMETHOD0(scoped_refptr<DtlsTransportInterface>, dtls_transport)
 PROXY_CONSTMETHOD0(uint32_t, ssrc)

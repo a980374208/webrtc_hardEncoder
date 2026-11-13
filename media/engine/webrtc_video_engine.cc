@@ -1516,6 +1516,19 @@ bool WebRtcVideoSendChannel::SetVideoSend(
   return kv->second->SetVideoSend(options, source);
 }
 
+#if defined(WEBRTC_LINUX_ENCODER_FACTORY_BINDING)
+RTCError WebRtcVideoSendChannel::SetVideoEncoderFactory(
+    uint32_t ssrc, std::shared_ptr<VideoEncoderFactory> factory) {
+  RTC_DCHECK_RUN_ON(&thread_checker_);
+  const auto found = send_streams_.find(ssrc);
+  if (!ssrc || found == send_streams_.end()) {
+    return RTCError(RTCErrorType::INVALID_PARAMETER,
+                    "Video encoder factory has no registered send stream");
+  }
+  return found->second->SetVideoEncoderFactory(std::move(factory));
+}
+#endif
+
 bool WebRtcVideoSendChannel::ValidateSendSsrcAvailability(
     const StreamParams& sp) const {
   for (uint32_t ssrc : sp.ssrcs) {
@@ -1880,6 +1893,27 @@ WebRtcVideoSendChannel::WebRtcVideoSendStream::~WebRtcVideoSendStream() {
     call_->DestroyVideoSendStream(stream_);
   }
 }
+
+#if defined(WEBRTC_LINUX_ENCODER_FACTORY_BINDING)
+RTCError WebRtcVideoSendChannel::WebRtcVideoSendStream::SetVideoEncoderFactory(
+    std::shared_ptr<VideoEncoderFactory> factory) {
+  RTC_DCHECK_RUN_ON(&thread_checker_);
+  if (factory == owned_encoder_factory_) return RTCError::OK();
+  if (!factory || source_) {
+    return RTCError(RTCErrorType::INVALID_STATE,
+                    "Cannot replace encoder factory after source attachment");
+  }
+  // AddSendStream can create a generic native stream before RtpSender has an
+  // SSRC. No source has been attached yet. Keep the previous lease through
+  // DestroyVideoSendStream (which stops/joins the encoder queue), then release.
+  auto previous_factory = std::move(owned_encoder_factory_);
+  owned_encoder_factory_ = std::move(factory);
+  parameters_.config.encoder_settings.encoder_factory =
+      owned_encoder_factory_.get();
+  if (stream_) RecreateWebRtcStream();
+  return RTCError::OK();
+}
+#endif
 
 bool WebRtcVideoSendChannel::WebRtcVideoSendStream::SetVideoSend(
     const VideoOptions* options,

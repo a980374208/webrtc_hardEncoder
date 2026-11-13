@@ -11,6 +11,7 @@
 #ifndef AUDIO_AUDIO_SEND_STREAM_H_
 #define AUDIO_AUDIO_SEND_STREAM_H_
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -130,6 +131,7 @@ class AudioSendStream final : public webrtc::AudioSendStream,
 
   void StoreEncoderProperties(int sample_rate_hz, size_t num_channels)
       RTC_RUN_ON(worker_thread_checker_);
+  void UpdateAudioStateRegistration() RTC_RUN_ON(worker_thread_checker_);
 
   void ConfigureStream(const Config& new_config,
                        bool first_time,
@@ -181,6 +183,11 @@ class AudioSendStream final : public webrtc::AudioSendStream,
   int encoder_sample_rate_hz_ RTC_GUARDED_BY(worker_thread_checker_) = 0;
   size_t encoder_num_channels_ RTC_GUARDED_BY(worker_thread_checker_) = 0;
   bool sending_ RTC_GUARDED_BY(worker_thread_checker_) = false;
+  bool muted_ RTC_GUARDED_BY(worker_thread_checker_) = false;
+  // Capture admission must preserve mute across asynchronous encoder work.
+  std::atomic<bool> capture_muted_{false};
+  bool registered_with_audio_state_
+      RTC_GUARDED_BY(worker_thread_checker_) = false;
   mutable Mutex audio_level_lock_;
   // Keeps track of audio level, total audio energy and total samples duration.
   // https://w3c.github.io/webrtc-stats/#dom-rtcaudiohandlerstats-totalaudioenergy

@@ -184,6 +184,7 @@ AudioSendStream::~AudioSendStream() {
   RTC_DCHECK_RUN_ON(&worker_thread_checker_);
   RTC_LOG(LS_INFO) << "~AudioSendStream: " << config_.rtp.ssrc;
   RTC_DCHECK(!sending_);
+  RTC_DCHECK(!registered_with_audio_state_);
   channel_send_->ResetSenderCongestionControlObjects();
 }
 
@@ -350,6 +351,7 @@ void AudioSendStream::ConfigureStream(
   }
 
   config_ = new_config;
+  UpdateAudioStateRegistration();
 
   webrtc::InvokeSetParametersCallback(callback, webrtc::RTCError::OK());
 }
@@ -373,13 +375,7 @@ void AudioSendStream::Start() {
   }
   channel_send_->StartSend();
   sending_ = true;
-  // Only register with AudioState if not using external source.
-  // External sources (like NativeAudioSource) deliver audio directly via AddSink,
-  // so we don't want AudioState to also send device audio to this stream.
-  if (!config_.external_source) {
-    audio_state()->AddSendingStream(this, encoder_sample_rate_hz_,
-                                    encoder_num_channels_);
-  }
+  UpdateAudioStateRegistration();
 }
 
 void AudioSendStream::Stop() {
@@ -391,16 +387,19 @@ void AudioSendStream::Stop() {
   RemoveBitrateObserver();
   channel_send_->StopSend();
   sending_ = false;
-  // Only unregister if we registered (when not using external source).
-  if (!config_.external_source) {
-    audio_state()->RemoveSendingStream(this);
-  }
+  UpdateAudioStateRegistration();
 }
 
 void AudioSendStream::SendAudioData(std::unique_ptr<AudioFrame> audio_frame) {
   RTC_CHECK_RUNS_SERIALIZED(&audio_capture_race_checker_);
   RTC_DCHECK_GT(audio_frame->sample_rate_hz_, 0);
   TRACE_EVENT0("webrtc", "AudioSendStream::SendAudioData");
+  // ChannelSend reads its mute setting later on the encoder queue and fades
+  // transitions. Frames captured while muted must contain no source samples,
+  // even if the worker unmutes the sender before that task runs.
+  if (capture_muted_.load(std::memory_order_acquire)) {
+    audio_frame->Mute();
+  }
   double duration = static_cast<double>(audio_frame->samples_per_channel_) /
                     audio_frame->sample_rate_hz_;
   {
@@ -430,7 +429,12 @@ bool AudioSendStream::SendTelephoneEvent(int payload_type,
 
 void AudioSendStream::SetMuted(bool muted) {
   RTC_DCHECK_RUN_ON(&worker_thread_checker_);
+  capture_muted_.store(muted, std::memory_order_release);
   channel_send_->SetInputMute(muted);
+  muted_ = muted;
+  if (registered_with_audio_state_) {
+    audio_state()->SetSendingStreamMuted(this, muted);
+  }
 }
 
 webrtc::AudioSendStream::Stats AudioSendStream::GetStats() const {
@@ -585,9 +589,22 @@ void AudioSendStream::StoreEncoderProperties(int sample_rate_hz,
                                              size_t num_channels) {
   encoder_sample_rate_hz_ = sample_rate_hz;
   encoder_num_channels_ = num_channels;
-  if (sending_) {
-    // Update AudioState's information about the stream.
-    audio_state()->AddSendingStream(this, sample_rate_hz, num_channels);
+  if (registered_with_audio_state_) {
+    // Codec reconfiguration must not enroll an external source in ADM audio.
+    audio_state()->AddSendingStream(this, sample_rate_hz, num_channels, muted_);
+  }
+}
+
+void AudioSendStream::UpdateAudioStateRegistration() {
+  RTC_DCHECK_RUN_ON(&worker_thread_checker_);
+  const bool should_register = sending_ && !config_.external_source;
+  if (should_register && !registered_with_audio_state_) {
+    audio_state()->AddSendingStream(this, encoder_sample_rate_hz_,
+                                    encoder_num_channels_, muted_);
+    registered_with_audio_state_ = true;
+  } else if (!should_register && registered_with_audio_state_) {
+    audio_state()->RemoveSendingStream(this);
+    registered_with_audio_state_ = false;
   }
 }
 

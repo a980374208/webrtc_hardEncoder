@@ -40,6 +40,220 @@ rtc_library("backend_video_encoder") {
   ]
 }
 
+# The candidate Linux backend has its own source/dependency boundary. The
+# Windows targets below keep their existing sources, libraries and switches.
+if (rtc_use_linux_nvenc || rtc_use_linux_qsv || rtc_use_linux_vaapi) {
+  assert(is_linux && rtc_use_h264,
+         "Linux hardware backends require Linux and rtc_use_h264")
+  rtc_library("linux_hardware_encoder_metrics") {
+    sources = [
+      "linux_hardware_encoder_metrics.cc",
+      "linux_hardware_encoder_metrics.h",
+    ]
+  }
+
+  rtc_source_set("linux_hardware_encoder_device") {
+    sources = [
+      "linux_hardware_encoder_device.h",
+      "linux_hardware_encoder_device_internal.h",
+    ]
+  }
+
+  rtc_library("linux_bounded_video_encoder_backend") {
+    sources = [
+      "linux_bounded_video_encoder_backend.cc",
+      "linux_bounded_video_encoder_backend.h",
+    ]
+    deps = [
+      ":hardware_encoder_probe",
+      ":linux_hardware_encoder_metrics",
+    ]
+    libs = [ "pthread" ]
+  }
+
+  if (rtc_linux_nvenc_build_tests || rtc_linux_qsv_build_tests ||
+      rtc_linux_vaapi_build_tests) {
+    rtc_executable("linux_bounded_backend_tests") {
+      testonly = true
+      sources = [ "linux_bounded_video_encoder_backend_unittest.cc" ]
+      deps = [
+        ":hardware_encoder_probe",
+        ":linux_bounded_video_encoder_backend",
+        ":linux_hardware_encoder_metrics",
+      ]
+    }
+  }
+}
+
+if (rtc_use_linux_nvenc) {
+  assert(is_linux && rtc_use_h264,
+         "rtc_use_linux_nvenc requires a Linux target and rtc_use_h264")
+  assert(rtc_linux_nvenc_include_dir != "" && rtc_linux_cuda_include_dir != "",
+         "Set the reviewed NVENC and CUDA driver-header directories")
+
+  rtc_library("linux_nvenc_video_encoder_backend") {
+    sources = [
+      "linux_nvenc_driver.cc",
+      "linux_nvenc_driver.h",
+      "nvenc_video_encoder_backend_linux.cc",
+      "nvenc_video_encoder_backend_linux.h",
+    ]
+    include_dirs = [
+      rtc_linux_nvenc_include_dir,
+      rtc_linux_cuda_include_dir,
+    ]
+    deps = [
+      ":hardware_encoder_probe",
+      ":linux_hardware_encoder_device",
+      ":linux_hardware_encoder_metrics",
+      "../../../../rtc_base:logging",
+    ]
+    libs = [ "dl" ]
+  }
+
+  rtc_library("linux_nvenc_video_encoder") {
+    sources = [
+      "linux_nvenc_video_encoder.cc",
+      "linux_nvenc_video_encoder.h",
+    ]
+    deps = [
+      ":backend_video_encoder",
+      ":hardware_encoder_probe",
+      ":linux_bounded_video_encoder_backend",
+      ":linux_hardware_encoder_device",
+      ":linux_nvenc_video_encoder_backend",
+      "../..:video_codec_interface",
+      "../../../../api/environment",
+      "../../../../api/video_codecs:video_codecs_api",
+    ]
+  }
+
+  if (rtc_linux_nvenc_build_tests) {
+    rtc_executable("linux_nvenc_backend_tests") {
+      testonly = true
+      sources = [ "nvenc_video_encoder_backend_linux_unittest.cc" ]
+      include_dirs = [
+        rtc_linux_nvenc_include_dir,
+        rtc_linux_cuda_include_dir,
+      ]
+      deps = [
+        ":hardware_encoder_probe",
+        ":linux_hardware_encoder_device",
+        ":linux_hardware_encoder_metrics",
+        ":linux_nvenc_video_encoder_backend",
+      ]
+    }
+  }
+}
+
+if (rtc_use_linux_qsv) {
+  assert(is_linux && rtc_use_h264,
+         "rtc_use_linux_qsv requires Linux and rtc_use_h264")
+  assert(rtc_linux_qsv_include_dir != "",
+         "Set the reviewed Linux oneVPL/VAAPI header directory")
+  rtc_library("linux_qsv_video_encoder_backend") {
+    sources = [
+      "linux_qsv_driver.cc",
+      "linux_qsv_driver.h",
+      "qsv_video_encoder_backend_linux.cc",
+      "qsv_video_encoder_backend_linux.h",
+    ]
+    include_dirs = [
+      rtc_linux_qsv_include_dir,
+      "$rtc_linux_qsv_include_dir/libdrm",
+    ]
+    defines = [ "ONEVPL_EXPERIMENTAL" ]
+    deps = [
+      ":hardware_encoder_probe",
+      ":linux_hardware_encoder_device",
+      ":linux_hardware_encoder_metrics",
+    ]
+    libs = [ "dl" ]
+  }
+  rtc_library("linux_qsv_video_encoder") {
+    sources = [
+      "linux_qsv_video_encoder.cc",
+      "linux_qsv_video_encoder.h",
+    ]
+    deps = [
+      ":backend_video_encoder",
+      ":hardware_encoder_probe",
+      ":linux_bounded_video_encoder_backend",
+      ":linux_hardware_encoder_device",
+      ":linux_qsv_video_encoder_backend",
+      "../..:video_codec_interface",
+      "../../../../api/environment",
+      "../../../../api/video_codecs:video_codecs_api",
+    ]
+  }
+  if (rtc_linux_qsv_build_tests) {
+    rtc_executable("linux_qsv_backend_tests") {
+      testonly = true
+      sources = [ "qsv_video_encoder_backend_linux_unittest.cc" ]
+      include_dirs = [
+        rtc_linux_qsv_include_dir,
+        "$rtc_linux_qsv_include_dir/libdrm",
+      ]
+      defines = [ "ONEVPL_EXPERIMENTAL" ]
+      deps = [
+        ":hardware_encoder_probe",
+        ":linux_bounded_video_encoder_backend",
+        ":linux_hardware_encoder_device",
+        ":linux_hardware_encoder_metrics",
+        ":linux_qsv_video_encoder_backend",
+      ]
+    }
+  }
+}
+
+if (rtc_use_linux_vaapi) {
+  assert(is_linux && rtc_use_h264,
+         "rtc_use_linux_vaapi requires Linux and rtc_use_h264")
+  rtc_library("linux_vaapi_video_encoder_backend") {
+    sources = [
+      "linux_vaapi_driver.cc",
+      "linux_vaapi_driver.h",
+      "linux_vaapi_runtime.h",
+      "vaapi_video_encoder_backend_linux.cc",
+      "vaapi_video_encoder_backend_linux.h",
+    ]
+    deps = [
+      ":hardware_encoder_probe",
+      ":linux_bounded_video_encoder_backend",
+      ":linux_hardware_encoder_device",
+      ":linux_hardware_encoder_metrics",
+    ]
+    libs = [ "dl" ]
+  }
+  rtc_library("linux_vaapi_video_encoder") {
+    sources = [
+      "linux_vaapi_video_encoder.cc",
+      "linux_vaapi_video_encoder.h",
+    ]
+    deps = [
+      ":backend_video_encoder",
+      ":linux_bounded_video_encoder_backend",
+      ":linux_hardware_encoder_device",
+      ":linux_vaapi_video_encoder_backend",
+      "../..:video_codec_interface",
+      "../../../../api/environment",
+      "../../../../api/video_codecs:video_codecs_api",
+    ]
+  }
+  if (rtc_linux_vaapi_build_tests) {
+    rtc_executable("linux_vaapi_backend_tests") {
+      testonly = true
+      sources = [ "vaapi_video_encoder_backend_linux_unittest.cc" ]
+      deps = [
+        ":linux_bounded_video_encoder_backend",
+        ":linux_hardware_encoder_device",
+        ":linux_hardware_encoder_metrics",
+        ":linux_vaapi_video_encoder_backend",
+      ]
+    }
+  }
+}
+
 if (rtc_use_nvenc) {
   assert(is_win && rtc_use_h264,
          "NVENC currently requires Windows and rtc_use_h264")
@@ -457,8 +671,8 @@ if (rtc_use_amf) {
 }
 
 if (rtc_use_x265) {
-  assert(is_win && rtc_use_h265,
-         "x265 currently requires Windows and rtc_use_h265")
+  assert((is_win || is_linux) && rtc_use_h265,
+         "x265 requires Windows/Linux and rtc_use_h265")
   assert(
       rtc_x265_include_dir != "" && rtc_x265_library != "" &&
           rtc_x265_license_file != "",

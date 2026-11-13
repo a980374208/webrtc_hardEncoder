@@ -5,7 +5,16 @@
  */
 #include "modules/video_coding/codecs/external/x265_video_encoder_backend.h"
 
+// x265 4.1 tests _MSC_VER directly in its public header. Keep WebRTC's
+// strict -Wundef everywhere except that third-party include on Linux Clang.
+#if defined(WEBRTC_LINUX) && defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wundef"
+#endif
 #include <x265.h>
+#if defined(WEBRTC_LINUX) && defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 #include <algorithm>
 #include <array>

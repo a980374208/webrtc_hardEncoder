@@ -800,6 +800,9 @@ class WebRtcVoiceSendChannel::WebRtcAudioSendStream : public AudioSource::Sink {
       UpdateSendCodecSpec(*send_codec_spec);
     }
 
+    // A sender without an attached source needs no device audio. It may still
+    // send RTP/DTMF; SetSource() selects the actual source type before capture.
+    config_.external_source = true;
     stream_ = call_->CreateAudioSendStream(config_);
   }
 
@@ -938,18 +941,14 @@ class WebRtcVoiceSendChannel::WebRtcAudioSendStream : public AudioSource::Sink {
   void SetSource(AudioSource* source) {
     RTC_DCHECK_RUN_ON(&worker_thread_checker_);
     RTC_DCHECK(source);
+    // A replaced track reuses the same sink adapter. Re-evaluate its source
+    // type even when the adapter pointer is unchanged, in both directions.
+    SetExternalSource(source->is_external_source());
     if (source_) {
       RTC_DCHECK(source_ == source);
       return;
     }
 
-    // Check if this is an external audio source (delivers audio via AddSink).
-    // If so, mark the config so AudioState doesn't send device audio to this
-    // stream. This must be done before UpdateSendState() calls Start().
-    if (source->is_external_source() && !config_.external_source) {
-      config_.external_source = true;
-      stream_->Reconfigure(config_, nullptr);
-    }
     source->SetSink(this);
     source_ = source;
     UpdateSendState();
@@ -969,6 +968,7 @@ class WebRtcVoiceSendChannel::WebRtcAudioSendStream : public AudioSource::Sink {
       source_->SetSink(nullptr);
       source_ = nullptr;
     }
+    SetExternalSource(true);
     UpdateSendState();
   }
 
@@ -1008,6 +1008,7 @@ class WebRtcVoiceSendChannel::WebRtcAudioSendStream : public AudioSource::Sink {
     // Set `source_` to nullptr to make sure no more callback will get into
     // the source.
     source_ = nullptr;
+    SetExternalSource(true);
     UpdateSendState();
   }
 
@@ -1087,6 +1088,15 @@ class WebRtcVoiceSendChannel::WebRtcAudioSendStream : public AudioSource::Sink {
   }
 
  private:
+  void SetExternalSource(bool external_source) {
+    RTC_DCHECK_RUN_ON(&worker_thread_checker_);
+    if (config_.external_source == external_source) {
+      return;
+    }
+    config_.external_source = external_source;
+    stream_->Reconfigure(config_, nullptr);
+  }
+
   void UpdateSendState() {
     RTC_DCHECK_RUN_ON(&worker_thread_checker_);
     RTC_DCHECK(stream_);
@@ -1505,17 +1515,9 @@ void WebRtcVoiceSendChannel::SetSend(bool send) {
   // Apply channel specific options.
   if (send) {
     engine()->ApplyOptions(options_);
-
-    // Initialize the ADM for recording (this may take time on some platforms,
-    // e.g. Android).
-    if (options_.init_recording_on_send.value_or(true) &&
-        // InitRecording() may return an error if the ADM is already recording.
-        !engine()->adm()->RecordingIsInitialized() &&
-        !engine()->adm()->Recording()) {
-      if (engine()->adm()->InitRecording() != 0) {
-        RTC_LOG(LS_WARNING) << "Failed to initialize recording";
-      }
-    }
+    // AudioState initializes recording after a native source is attached.
+    // A channel can contain only external/no-source senders, so SetSend alone
+    // must not initialize the shared microphone device.
   }
 
   // Change the settings on each send channel.
@@ -1533,10 +1535,16 @@ bool WebRtcVoiceSendChannel::SetAudioSend(uint32_t ssrc,
   RTC_DCHECK_RUN_ON(worker_thread_);
   // TODO(solenberg): The state change should be fully rolled back if any one of
   //                  these calls fail.
+  // A disabled replacement must already be muted when SetLocalSource enrolls
+  // its native source in an AudioState whose device may be recording for a
+  // different sender. Enabled replacements retain their old mute until bound.
+  if (!enable && !MuteStream(ssrc, true)) {
+    return false;
+  }
   if (!SetLocalSource(ssrc, source)) {
     return false;
   }
-  if (!MuteStream(ssrc, !enable)) {
+  if (enable && !MuteStream(ssrc, false)) {
     return false;
   }
   if (enable && options) {
@@ -1709,53 +1717,8 @@ bool WebRtcVoiceSendChannel::MuteStream(uint32_t ssrc, bool muted) {
   }
   it->second->SetMuted(muted);
 
-  // TODO(solenberg):
-  // We set the AGC to mute state only when all the channels are muted.
-  // This implementation is not ideal, instead we should signal the AGC when
-  // the mic channel is muted/unmuted. We can't do it today because there
-  // is no good way to know which stream is mapping to the mic channel.
-  if (send_streams_.size() > 0) {
-    // This will be true if MuteStream is called from
-    // AudioRtpSender::ClearSend().
-    bool is_all_no_source =
-        std::none_of(send_streams_.begin(), send_streams_.end(),
-                     [](const auto& kv) { return kv.second->HasSource(); });
-
-    bool is_all_muted =
-        std::all_of(send_streams_.begin(), send_streams_.end(),
-                    [](const auto& kv) { return kv.second->IsMuted(); });
-
-    // Only mute the microphone if we're not in cleanup state
-    // (i.e. if we have active send streams)
-    webrtc::AudioProcessing* ap = engine()->apm();
-    if (ap) {
-      bool v = !is_all_no_source && is_all_muted;
-      RTC_LOG(LS_INFO) << "WebRtcVoiceSendChannel::MuteStream: APM:" << v;
-      ap->set_output_will_be_muted(v);
-    }
-
-    if (!is_all_no_source) {
-      // We don't mute when ClearSend() is called.
-      webrtc::AudioDeviceModule* adm = engine()->adm();
-      if (adm) {
-        RTC_LOG(LS_INFO) << "WebRtcVoiceSendChannel::MuteStream: ADM:"
-                         << is_all_muted;
-
-        if (adm->IsStopOnMuteModeEnabled()) {
-          if (!is_all_muted && !adm->Recording()) {
-            if (adm->InitRecording() == 0) {
-              adm->StartRecording();
-            }
-          } else if (is_all_muted && adm->Recording()) {
-            adm->StopRecording();
-          }
-        } else {
-          adm->SetMicrophoneMute(is_all_muted);
-        }
-      }
-    }
-  }
-
+  // AudioState owns the shared ADM/APM and aggregates all native senders.
+  // Per-channel mute must never control another channel's microphone.
   return true;
 }
 
