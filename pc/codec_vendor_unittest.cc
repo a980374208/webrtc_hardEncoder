@@ -10,7 +10,10 @@
 
 #include "pc/codec_vendor.h"
 
+#include <cstddef>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "absl/strings/string_view.h"
@@ -51,6 +54,20 @@ Codec CreateRedAudioCodec(absl::string_view encoding_id) {
   red.SetParam(kCodecParamNotInNameValueFormat,
                std::string(encoding_id) + '/' + std::string(encoding_id));
   return red;
+}
+
+Codec CreateH264VideoCodec(int payload_type,
+                           absl::string_view profile_level_id,
+                           absl::string_view packetization_mode = "1",
+                           absl::string_view level_asymmetry_allowed = "1") {
+  Codec codec = CreateVideoCodec(payload_type, kH264CodecName);
+  if (!profile_level_id.empty()) {
+    codec.params[kH264FmtpProfileLevelId] = std::string(profile_level_id);
+  }
+  codec.params[kH264FmtpPacketizationMode] = std::string(packetization_mode);
+  codec.params[kH264FmtpLevelAsymmetryAllowed] =
+      std::string(level_asymmetry_allowed);
+  return codec;
 }
 
 const Codec kAudioCodecs1[] = {CreateAudioCodec(111, "opus", 48000, 2),
@@ -207,6 +224,173 @@ TEST(CodecVendorTest, PreferencesAffectCodecChoice) {
   EXPECT_THAT(offered_codecs.value(),
               Not(Contains(Field("name", &Codec::name, "vp8"))));
   EXPECT_THAT(offered_codecs.value().size(), Eq(1));
+}
+
+TEST(CodecVendorTest, H264OfferLevelsFollowMediaDirection) {
+  Environment env = CreateEnvironment();
+  const struct {
+    const char* send_profile_level_id;
+    const char* recv_profile_level_id;
+    const char* level_asymmetry_allowed;
+    RtpTransceiverDirection direction;
+    const char* offered_profile_level_id;
+  } cases[] = {
+      {"420028", "42001f", "1", RtpTransceiverDirection::kSendOnly, "420028"},
+      {"420028", "42001f", "1", RtpTransceiverDirection::kRecvOnly, "42001f"},
+      {"42001f", "420028", "1", RtpTransceiverDirection::kRecvOnly, "420028"},
+      {"420028", "42001f", "1", RtpTransceiverDirection::kSendRecv, "42001f"},
+      {"42001f", "420028", "1", RtpTransceiverDirection::kSendRecv, "420028"},
+      {"420028", "42001f", "0", RtpTransceiverDirection::kSendRecv, "42001f"},
+      {"42001f", "420028", "0", RtpTransceiverDirection::kSendRecv, "42001f"},
+      {"42e00b", "42f00b", "0", RtpTransceiverDirection::kSendRecv, "42f00b"},
+      {"42001f", "420028", "1", RtpTransceiverDirection::kInactive, "420028"},
+      {"42001f", "420028", "0", RtpTransceiverDirection::kStopped, "42001f"},
+  };
+  for (const auto& test_case : cases) {
+    for (bool use_preferences : {false, true}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "send=" << test_case.send_profile_level_id
+                   << " recv=" << test_case.recv_profile_level_id
+                   << " asymmetry=" << test_case.level_asymmetry_allowed
+                   << " direction=" << static_cast<int>(test_case.direction)
+                   << " preferences=" << use_preferences);
+      Codec send_codec =
+          CreateH264VideoCodec(97, test_case.send_profile_level_id, "1",
+                               test_case.level_asymmetry_allowed);
+      Codec recv_codec =
+          CreateH264VideoCodec(101, test_case.recv_profile_level_id, "1",
+                               test_case.level_asymmetry_allowed);
+      FakeMediaEngine media_engine;
+      media_engine.SetVideoSendCodecs({send_codec});
+      media_engine.SetVideoRecvCodecs({recv_codec});
+      CodecVendor codec_vendor(&media_engine, /*rtx_enabled=*/false,
+                               env.field_trials());
+      MediaDescriptionOptions options(MediaType::VIDEO, "mid",
+                                      test_case.direction, false);
+      if (use_preferences) {
+        options.codec_preferences = {ToRtpCodecCapability(send_codec)};
+      }
+      FakePayloadTypeSuggester pt_suggester;
+      auto offered_codecs = codec_vendor.GetNegotiatedCodecsForOffer(
+          options, MediaSessionOptions(), nullptr, pt_suggester);
+      ASSERT_TRUE(offered_codecs.ok());
+      ASSERT_EQ(offered_codecs.value().size(), 1u);
+      EXPECT_THAT(offered_codecs.value()[0].params,
+                  Contains(Pair(kH264FmtpProfileLevelId,
+                                test_case.offered_profile_level_id)));
+    }
+  }
+}
+
+TEST(CodecVendorTest, H264ReofferRestoresSendLevelAndPreservesPayloadTypes) {
+  Environment env = CreateEnvironment();
+  Codec send_codec = CreateH264VideoCodec(97, "420028");
+  Codec recv_codec = CreateH264VideoCodec(101, "42001f");
+  Codec current_codec = CreateH264VideoCodec(121, "42001f");
+  current_codec.params["max-fs"] = "8160";
+  const Codec current_rtx = CreateVideoRtxCodec(122, 121);
+  auto current_description = std::make_unique<VideoContentDescription>();
+  current_description->set_codecs({current_codec, current_rtx});
+  ContentInfo current_content(MediaProtocolType::kRtp, "mid",
+                              std::move(current_description));
+  for (bool use_preferences : {false, true}) {
+    SCOPED_TRACE(use_preferences);
+    FakeMediaEngine media_engine;
+    media_engine.SetVideoSendCodecs({send_codec, CreateVideoRtxCodec(98, 97)});
+    media_engine.SetVideoRecvCodecs(
+        {recv_codec, CreateVideoRtxCodec(102, 101)});
+    CodecVendor codec_vendor(&media_engine, /*rtx_enabled=*/true,
+                             env.field_trials());
+    MediaDescriptionOptions options(MediaType::VIDEO, "mid",
+                                    RtpTransceiverDirection::kSendOnly, false);
+    if (use_preferences) {
+      options.codec_preferences = {
+          ToRtpCodecCapability(send_codec),
+          ToRtpCodecCapability(CreateVideoRtxCodec(98, 97)),
+      };
+    }
+    FakePayloadTypeSuggester pt_suggester;
+    auto offered_codecs = codec_vendor.GetNegotiatedCodecsForOffer(
+        options, MediaSessionOptions(), &current_content, pt_suggester);
+    ASSERT_TRUE(offered_codecs.ok());
+    Codec expected_codec = current_codec;
+    expected_codec.params[kH264FmtpProfileLevelId] = "420028";
+    EXPECT_THAT(offered_codecs.value(),
+                ElementsAre(expected_codec, current_rtx));
+  }
+}
+
+TEST(CodecVendorTest, H264OfferLevelsMatchProfileAndPacketizationMode) {
+  Environment env = CreateEnvironment();
+  const std::vector<Codec> send_codecs = {
+      CreateH264VideoCodec(97, "420028", "1"),
+      CreateH264VideoCodec(99, "42001f", "0"),
+      CreateH264VideoCodec(101, "64002a", "1"),
+  };
+  const std::vector<Codec> recv_codecs = {
+      CreateH264VideoCodec(107, "42001f", "1"),
+      CreateH264VideoCodec(109, "420028", "0"),
+      CreateH264VideoCodec(115, "64001f", "1"),
+  };
+  FakeMediaEngine media_engine;
+  media_engine.SetVideoSendCodecs(send_codecs);
+  media_engine.SetVideoRecvCodecs(recv_codecs);
+  CodecVendor codec_vendor(&media_engine, /*rtx_enabled=*/false,
+                           env.field_trials());
+  MediaDescriptionOptions options(MediaType::VIDEO, "mid",
+                                  RtpTransceiverDirection::kSendOnly, false);
+  for (const Codec& codec : send_codecs) {
+    options.codec_preferences.push_back(ToRtpCodecCapability(codec));
+  }
+  FakePayloadTypeSuggester pt_suggester;
+  auto offered_codecs = codec_vendor.GetNegotiatedCodecsForOffer(
+      options, MediaSessionOptions(), nullptr, pt_suggester);
+  ASSERT_TRUE(offered_codecs.ok());
+  std::vector<Codec> expected_codecs = recv_codecs;
+  for (size_t i = 0; i < expected_codecs.size(); ++i) {
+    expected_codecs[i].params[kH264FmtpProfileLevelId] =
+        send_codecs[i].params.at(kH264FmtpProfileLevelId);
+  }
+  EXPECT_EQ(offered_codecs.value(), expected_codecs);
+}
+
+TEST(CodecVendorTest, H264OfferPreservesDefaultProfileLevelId) {
+  Environment env = CreateEnvironment();
+  Codec send_codec = CreateH264VideoCodec(97, "");
+  Codec recv_codec = CreateH264VideoCodec(101, "42e028");
+  FakeMediaEngine media_engine;
+  media_engine.SetVideoSendCodecs({send_codec});
+  media_engine.SetVideoRecvCodecs({recv_codec});
+  CodecVendor codec_vendor(&media_engine, /*rtx_enabled=*/false,
+                           env.field_trials());
+  MediaDescriptionOptions options(MediaType::VIDEO, "mid",
+                                  RtpTransceiverDirection::kSendOnly, false);
+  options.codec_preferences = {ToRtpCodecCapability(send_codec)};
+  FakePayloadTypeSuggester pt_suggester;
+  auto offered_codecs = codec_vendor.GetNegotiatedCodecsForOffer(
+      options, MediaSessionOptions(), nullptr, pt_suggester);
+  ASSERT_TRUE(offered_codecs.ok());
+  recv_codec.params.erase(kH264FmtpProfileLevelId);
+  EXPECT_THAT(offered_codecs.value(), ElementsAre(recv_codec));
+}
+
+TEST(CodecVendorTest, H264AnswerStillHonorsRemoteLevelWithoutAsymmetry) {
+  Environment env = CreateEnvironment();
+  Codec send_codec = CreateH264VideoCodec(97, "420028", "1", "0");
+  Codec remote_codec = CreateH264VideoCodec(101, "42001f", "1", "0");
+  FakeMediaEngine media_engine;
+  media_engine.SetVideoSendCodecs({send_codec});
+  CodecVendor codec_vendor(&media_engine, /*rtx_enabled=*/false,
+                           env.field_trials());
+  MediaDescriptionOptions options(MediaType::VIDEO, "mid",
+                                  RtpTransceiverDirection::kSendOnly, false);
+  FakePayloadTypeSuggester pt_suggester;
+  auto answered_codecs = codec_vendor.GetNegotiatedCodecsForAnswer(
+      options, MediaSessionOptions(), RtpTransceiverDirection::kRecvOnly,
+      RtpTransceiverDirection::kSendOnly, nullptr, {remote_codec},
+      pt_suggester);
+  EXPECT_THAT(answered_codecs,
+              IsRtcOkAndHolds(std::vector<Codec>{remote_codec}));
 }
 
 TEST(CodecVendorTest, GetNegotiatedCodecsForAnswerSimple) {

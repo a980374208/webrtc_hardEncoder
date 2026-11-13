@@ -396,8 +396,8 @@ void NegotiateTxMode(const Codec& local_codec,
 }
 #endif
 
-// For offer, negotiated codec must have the same level-id as that in
-// |supported_codecs| with same profile.
+// For offer, negotiated codec levels must match the corresponding format in
+// |supported_codecs|, which is filtered for the media section's direction.
 void NegotiateVideoCodecLevelsForOffer(
     const MediaDescriptionOptions& media_description_options,
     const CodecList& supported_codecs,
@@ -405,6 +405,32 @@ void NegotiateVideoCodecLevelsForOffer(
   RTC_DCHECK_DISALLOW_THREAD_BLOCKING_CALLS();
   if (filtered_codecs.empty() || supported_codecs.empty()) {
     return;
+  }
+
+  if (media_description_options.type == MediaType::VIDEO) {
+    for (Codec& filtered_codec : filtered_codecs) {
+      if (!absl::EqualsIgnoreCase(filtered_codec.name, kH264CodecName)) {
+        continue;
+      }
+      // The shared codec pool preserves payload types but merges H.264 formats
+      // ignoring level. Restore the direction-specific level without changing
+      // the payload type or RTX associations. Matching also checks profile and
+      // packetization mode; sendrecv formats already apply level asymmetry.
+      std::optional<Codec> supported_codec =
+          FindMatchingCodec(filtered_codecs, supported_codecs, filtered_codec);
+      if (!supported_codec) {
+        continue;
+      }
+      const auto profile_level_id =
+          supported_codec->params.find(kH264FmtpProfileLevelId);
+      if (profile_level_id != supported_codec->params.end()) {
+        filtered_codec.params[kH264FmtpProfileLevelId] =
+            profile_level_id->second;
+      } else {
+        // A missing profile-level-id denotes the default profile and level.
+        filtered_codec.params.erase(kH264FmtpProfileLevelId);
+      }
+    }
   }
 
   // TODO(http://crbugs.com/376306259): We should handle level-idx for AV1.
