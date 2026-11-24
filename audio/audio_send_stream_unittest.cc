@@ -89,7 +89,7 @@ constexpr double kEchoReturnLoss = -65;
 constexpr double kEchoReturnLossEnhancement = 101;
 constexpr double kResidualEchoLikelihood = -1.0f;
 constexpr double kResidualEchoLikelihoodMax = 23.0f;
-constexpr ChannelSendStatistics kChannelStats = {
+const ChannelSendStatistics kChannelStats = {
     .round_trip_time = TimeDelta::Millis(112),
     .payload_bytes_sent = 12,
     .header_and_padding_bytes_sent = 13456,
@@ -182,7 +182,8 @@ class ConfigHelper {
     AudioState::Config config;
     config.audio_mixer = AudioMixerImpl::Create();
     config.audio_processing = audio_processing_;
-    config.audio_device_module = make_ref_counted<MockAudioDeviceModule>();
+    audio_device_module_ = make_ref_counted<MockAudioDeviceModule>();
+    config.audio_device_module = audio_device_module_;
     audio_state_ = AudioState::Create(config);
 
     SetupDefaultChannelSend(audio_bwe_enabled);
@@ -221,6 +222,7 @@ class ConfigHelper {
   }
   MockRtpRtcpInterface* rtp_rtcp() { return &rtp_rtcp_; }
   MockChannelSend* channel_send() { return channel_send_; }
+  MockAudioDeviceModule& audio_device_module() { return *audio_device_module_; }
   RtpTransportControllerSendInterface* transport() { return &rtp_transport_; }
   MockBitrateAllocator* bitrate_allocator() { return &bitrate_allocator_; }
 
@@ -329,6 +331,7 @@ class ConfigHelper {
   FieldTrials field_trials_;
   RealTimeController time_controller_;
   scoped_refptr<AudioState> audio_state_;
+  scoped_refptr<MockAudioDeviceModule> audio_device_module_;
   AudioSendStream::Config stream_config_;
   ::testing::StrictMock<MockChannelSend>* channel_send_ = nullptr;
   scoped_refptr<MockAudioProcessing> audio_processing_;
@@ -417,6 +420,97 @@ TEST(AudioSendStreamTest, SetMuted) {
     auto send_stream = helper.CreateAudioSendStream();
     EXPECT_CALL(*helper.channel_send(), SetInputMute(true));
     send_stream->SetMuted(true);
+  }
+}
+
+TEST(AudioSendStreamTest, SourceTransitionsBalanceDeviceRegistration) {
+  for (bool use_null_audio_processing : {false, true}) {
+    ConfigHelper helper(false, true, use_null_audio_processing);
+    helper.config().external_source = true;
+    auto send_stream = helper.CreateAudioSendStream();
+    auto& adm = helper.audio_device_module();
+    EXPECT_CALL(adm, InitRecording()).Times(2);
+    EXPECT_CALL(adm, StartRecording()).Times(2);
+    EXPECT_CALL(adm, StopRecording()).Times(2);
+    EXPECT_CALL(*helper.channel_send(), StartSend()).Times(1);
+    EXPECT_CALL(*helper.channel_send(), StopSend()).Times(1);
+
+    send_stream->Start();
+    send_stream->Start();
+    helper.config().external_source = false;
+    send_stream->Reconfigure(helper.config(), nullptr);
+    helper.config().external_source = true;
+    send_stream->Reconfigure(helper.config(), nullptr);
+
+    // Replacing an external source's codec must not enroll it in ADM capture.
+    EXPECT_CALL(*helper.channel_send(), SetEncoder).WillOnce(Return());
+    helper.config().send_codec_spec =
+        AudioSendStream::Config::SendCodecSpec(0, kOpusFormat);
+    send_stream->Reconfigure(helper.config(), nullptr);
+
+    helper.config().external_source = false;
+    send_stream->Reconfigure(helper.config(), nullptr);
+    send_stream->Stop();
+    send_stream->Stop();
+  }
+}
+
+TEST(AudioSendStreamTest, MutedNativeCodecReconfigureDoesNotRestartCapture) {
+  for (bool use_null_audio_processing : {false, true}) {
+    ConfigHelper helper(false, true, use_null_audio_processing);
+    auto send_stream = helper.CreateAudioSendStream();
+    auto& adm = helper.audio_device_module();
+    EXPECT_CALL(adm, InitRecording()).Times(1);
+    EXPECT_CALL(adm, StartRecording()).Times(1);
+    EXPECT_CALL(adm, StopRecording()).Times(1);
+    EXPECT_CALL(*helper.channel_send(), StartSend());
+    EXPECT_CALL(*helper.channel_send(), StopSend());
+    EXPECT_CALL(*helper.channel_send(), SetInputMute(true));
+    EXPECT_CALL(*helper.channel_send(), SetInputMute(false));
+
+    send_stream->SetMuted(true);
+    send_stream->Start();
+    EXPECT_CALL(*helper.channel_send(), SetEncoder).WillOnce(Return());
+    helper.config().send_codec_spec =
+        AudioSendStream::Config::SendCodecSpec(0, kOpusFormat);
+    send_stream->Reconfigure(helper.config(), nullptr);
+    send_stream->SetMuted(false);
+    send_stream->Stop();
+  }
+}
+
+TEST(AudioSendStreamTest, CapturedMutedFrameStaysSilentAfterUnmute) {
+  for (bool use_null_audio_processing : {false, true}) {
+    ConfigHelper helper(false, true, use_null_audio_processing);
+    auto send_stream = helper.CreateAudioSendStream();
+    std::vector<std::unique_ptr<AudioFrame>> queued_frames;
+    EXPECT_CALL(*helper.channel_send(), SetInputMute(true));
+    EXPECT_CALL(*helper.channel_send(), SetInputMute(false));
+    EXPECT_CALL(*helper.channel_send(), ProcessAndEncodeAudio)
+        .Times(2)
+        .WillRepeatedly([&](std::unique_ptr<AudioFrame> frame) {
+          queued_frames.push_back(std::move(frame));
+        });
+
+    send_stream->SetMuted(true);
+    send_stream->SendAudioData(
+        CreateAudioFrame1kHzSineWave(32767, 10, 48000, 1));
+    send_stream->SetMuted(false);
+    send_stream->SendAudioData(
+        CreateAudioFrame1kHzSineWave(32767, 10, 48000, 1));
+
+    // The encoder may consume the captured frame only after the worker unmutes.
+    ASSERT_EQ(queued_frames.size(), 2u);
+    EXPECT_TRUE(queued_frames[0]->muted());
+    for (size_t i = 0; i < queued_frames[0]->samples_per_channel_; ++i) {
+      EXPECT_EQ(queued_frames[0]->data()[i], 0);
+    }
+    EXPECT_FALSE(queued_frames[1]->muted());
+    bool has_nonzero_sample = false;
+    for (size_t i = 0; i < queued_frames[1]->samples_per_channel_; ++i) {
+      has_nonzero_sample |= queued_frames[1]->data()[i] != 0;
+    }
+    EXPECT_TRUE(has_nonzero_sample);
   }
 }
 

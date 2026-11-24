@@ -38,6 +38,7 @@
 #include "api/video/builtin_video_bitrate_allocator_factory.h"
 #include "api/video/video_bitrate_allocator_factory.h"
 #include "api/video/video_codec_constants.h"
+#include "media/base/audio_source.h"
 #include "media/base/codec.h"
 #include "media/base/fake_media_engine.h"
 #include "media/base/media_channel.h"
@@ -84,6 +85,32 @@ class MockSetStreamsObserver
     : public webrtc::RtpSenderBase::SetStreamsObserver {
  public:
   MOCK_METHOD(void, OnSetStreams, (), (override));
+};
+
+class ExternalAudioSourceForTest : public webrtc::LocalAudioSource {
+ public:
+  bool is_external_source() const override { return true; }
+};
+
+class SourceInspectingVoiceMediaSendChannel
+    : public webrtc::FakeVoiceMediaSendChannel {
+ public:
+  SourceInspectingVoiceMediaSendChannel()
+      : FakeVoiceMediaSendChannel(webrtc::AudioOptions(),
+                                 webrtc::Thread::Current()) {}
+
+  bool SetAudioSend(uint32_t ssrc,
+                    bool enable,
+                    const webrtc::AudioOptions* options,
+                    webrtc::AudioSource* source) override {
+    last_source = source;
+    external_source = source && source->is_external_source();
+    return FakeVoiceMediaSendChannel::SetAudioSend(ssrc, enable, options,
+                                                 source);
+  }
+
+  webrtc::AudioSource* last_source = nullptr;
+  bool external_source = false;
 };
 
 }  // namespace
@@ -538,6 +565,44 @@ class RtpSenderReceiverTest
 TEST_F(RtpSenderReceiverTest, AddAndDestroyAudioRtpSender) {
   CreateAudioRtpSender();
   DestroyAudioRtpSender();
+}
+
+TEST_F(RtpSenderReceiverTest,
+       AudioTrackReplacementUpdatesExternalSourceInBothDirections) {
+  SourceInspectingVoiceMediaSendChannel channel;
+  ASSERT_TRUE(channel.AddSendStream(StreamParams::CreateLegacy(kAudioSsrc)));
+  CreateAudioRtpSenderWithNoTrack();
+  audio_rtp_sender_->SetMediaChannel(&channel);
+  audio_rtp_sender_->SetSsrc(kAudioSsrc);
+
+  auto native_track =
+      AudioTrack::Create("native", LocalAudioSource::Create(nullptr));
+  auto external_track = AudioTrack::Create(
+      "external", make_ref_counted<ExternalAudioSourceForTest>());
+  auto no_source_track = AudioTrack::Create("no-source", nullptr);
+
+  ASSERT_TRUE(audio_rtp_sender_->SetTrack(native_track.get()));
+  ASSERT_NE(channel.last_source, nullptr);
+  auto* const adapter = channel.last_source;
+  EXPECT_FALSE(channel.external_source);
+  ASSERT_TRUE(audio_rtp_sender_->SetTrack(external_track.get()));
+  EXPECT_EQ(channel.last_source, adapter);
+  EXPECT_TRUE(channel.external_source);
+
+  native_track->set_enabled(false);
+  ASSERT_TRUE(audio_rtp_sender_->SetTrack(native_track.get()));
+  EXPECT_EQ(channel.last_source, adapter);
+  EXPECT_FALSE(channel.external_source);
+  EXPECT_TRUE(channel.IsStreamMuted(kAudioSsrc));
+
+  ASSERT_TRUE(audio_rtp_sender_->SetTrack(external_track.get()));
+  EXPECT_TRUE(channel.external_source);
+  ASSERT_TRUE(audio_rtp_sender_->SetTrack(no_source_track.get()));
+  EXPECT_EQ(channel.last_source, adapter);
+  EXPECT_FALSE(channel.external_source);
+
+  DestroyAudioRtpSender();
+  EXPECT_EQ(channel.last_source, nullptr);
 }
 
 // Test that `video_channel_` is updated when a video track is associated and

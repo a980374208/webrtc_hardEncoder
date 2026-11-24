@@ -52,6 +52,7 @@ using ::testing::InSequence;
 using ::testing::Matcher;
 using ::testing::NiceMock;
 using ::testing::NotNull;
+using ::testing::Return;
 using ::testing::StrictMock;
 using ::testing::Values;
 
@@ -148,6 +149,45 @@ struct ConfigHelper {
   AudioState::Config audio_state_config;
   scoped_refptr<AudioMixer> audio_mixer;
   FakeAsyncAudioProcessingHelper async_audio_processing_helper_;
+};
+
+// Model the observable ADM state so sender changes can be checked against the
+// same recording device, rather than independent default mock return values.
+struct RecordingDeviceState {
+  explicit RecordingDeviceState(MockAudioDeviceModule& adm) {
+    ON_CALL(adm, Recording()).WillByDefault([this] { return recording; });
+    ON_CALL(adm, RecordingIsInitialized()).WillByDefault([this] {
+      return initialized;
+    });
+    ON_CALL(adm, InitRecording()).WillByDefault([this] {
+      initialized = true;
+      return 0;
+    });
+    ON_CALL(adm, StartRecording()).WillByDefault([this] {
+      recording = true;
+      // AudioEngineDevice::StartRecording always clears the device mute.
+      microphone_muted = false;
+      return 0;
+    });
+    ON_CALL(adm, SetMicrophoneMute(_)).WillByDefault([this](bool muted) {
+      microphone_muted = muted;
+      return 0;
+    });
+    ON_CALL(adm, StopRecording()).WillByDefault([this] {
+      recording = false;
+      initialized = false;
+      return 0;
+    });
+  }
+
+  bool recording = false;
+  bool initialized = false;
+  bool microphone_muted = false;
+};
+
+class KeepRecordingAudioDevice : public NiceMock<MockAudioDeviceModule> {
+ public:
+  bool IsStopOnMuteModeEnabled() const override { return false; }
 };
 
 class FakeAudioSource : public AudioMixer::Source {
@@ -447,6 +487,158 @@ TEST_P(AudioStateTest, AlwaysCallInitRecordingBeforeStartRecording) {
 
   EXPECT_CALL(*adm, StopRecording());
   audio_state->RemoveSendingStream(&stream);
+}
+
+TEST_P(AudioStateTest, NativeSenderMuteIsAggregatedAcrossStreams) {
+  ConfigHelper helper(GetParam());
+  auto& adm = *static_cast<MockAudioDeviceModule*>(
+      helper.config().audio_device_module.get());
+  RecordingDeviceState device(adm);
+  auto audio_state = make_ref_counted<internal::AudioState>(helper.config());
+  MockAudioSendStream first;
+  MockAudioSendStream second;
+
+  EXPECT_CALL(adm, InitRecording()).Times(2);
+  EXPECT_CALL(adm, StartRecording()).Times(2);
+  EXPECT_CALL(adm, StopRecording()).Times(3);
+  EXPECT_CALL(adm, SetMicrophoneMute(_)).Times(0);
+  if (auto* ap =
+          static_cast<MockAudioProcessing*>(audio_state->audio_processing())) {
+    InSequence sequence;
+    EXPECT_CALL(*ap, set_output_will_be_muted(false));
+    EXPECT_CALL(*ap, set_output_will_be_muted(false));
+    EXPECT_CALL(*ap, set_output_will_be_muted(false));
+    EXPECT_CALL(*ap, set_output_will_be_muted(true));
+    EXPECT_CALL(*ap, set_output_will_be_muted(false));
+    EXPECT_CALL(*ap, set_output_will_be_muted(true));
+    EXPECT_CALL(*ap, set_output_will_be_muted(false));
+  }
+
+  audio_state->AddSendingStream(&first, kSampleRate, kNumberOfChannels);
+  audio_state->AddSendingStream(&second, kSampleRate, kNumberOfChannels);
+  audio_state->SetSendingStreamMuted(&first, true);
+  EXPECT_TRUE(device.recording);
+  audio_state->SetSendingStreamMuted(&second, true);
+  EXPECT_FALSE(device.recording);
+  audio_state->SetSendingStreamMuted(&first, false);
+  EXPECT_TRUE(device.recording);
+  audio_state->RemoveSendingStream(&first);
+  EXPECT_FALSE(device.recording);
+  audio_state->RemoveSendingStream(&second);
+  EXPECT_FALSE(device.initialized);
+}
+
+TEST_P(AudioStateTest, RecordingDisableBlocksSenderChangesFromReopeningDevice) {
+  ConfigHelper helper(GetParam());
+  auto& adm = *static_cast<MockAudioDeviceModule*>(
+      helper.config().audio_device_module.get());
+  RecordingDeviceState device(adm);
+  auto audio_state = make_ref_counted<internal::AudioState>(helper.config());
+  MockAudioSendStream first;
+  MockAudioSendStream second;
+
+  EXPECT_CALL(adm, InitRecording()).Times(2);
+  EXPECT_CALL(adm, StartRecording()).Times(2);
+  EXPECT_CALL(adm, StopRecording()).Times(2);
+  audio_state->AddSendingStream(&first, kSampleRate, kNumberOfChannels);
+  audio_state->SetRecording(false);
+  audio_state->SetSendingStreamMuted(&first, true);
+  audio_state->SetSendingStreamMuted(&first, false);
+  audio_state->AddSendingStream(&second, kSampleRate, kNumberOfChannels);
+  EXPECT_FALSE(device.recording);
+  EXPECT_FALSE(device.initialized);
+  audio_state->SetRecording(true);
+  EXPECT_TRUE(device.recording);
+  audio_state->RemoveSendingStream(&first);
+  EXPECT_TRUE(device.recording);
+  audio_state->RemoveSendingStream(&second);
+  EXPECT_FALSE(device.recording);
+}
+
+TEST_P(AudioStateTest, FailedRecordingInitIsReleasedOnDisableAndFinalRemoval) {
+  ConfigHelper helper(GetParam());
+  auto& adm = *static_cast<MockAudioDeviceModule*>(
+      helper.config().audio_device_module.get());
+  auto audio_state = make_ref_counted<internal::AudioState>(helper.config());
+  MockAudioSendStream stream;
+
+  // A failed ADM need not report partially allocated resources as initialized.
+  EXPECT_CALL(adm, InitRecording()).Times(2).WillRepeatedly(Return(-1));
+  EXPECT_CALL(adm, StartRecording()).Times(0);
+  EXPECT_CALL(adm, StopRecording()).Times(2);
+  audio_state->AddSendingStream(&stream, kSampleRate, kNumberOfChannels);
+  audio_state->SetRecording(false);
+  audio_state->SetRecording(true);
+  audio_state->RemoveSendingStream(&stream);
+}
+
+TEST_P(AudioStateTest, KeepRecordingModeMutesDeviceWithoutStoppingCapture) {
+  ConfigHelper helper(GetParam());
+  auto adm = make_ref_counted<KeepRecordingAudioDevice>();
+  helper.config().audio_device_module = adm;
+  RecordingDeviceState device(*adm);
+  auto audio_state = make_ref_counted<internal::AudioState>(helper.config());
+  MockAudioSendStream stream;
+
+  EXPECT_CALL(*adm, InitRecording()).Times(1);
+  EXPECT_CALL(*adm, StartRecording()).Times(1);
+  EXPECT_CALL(*adm, StopRecording()).Times(1);
+  {
+    InSequence sequence;
+    EXPECT_CALL(*adm, SetMicrophoneMute(false));
+    EXPECT_CALL(*adm, SetMicrophoneMute(true));
+    EXPECT_CALL(*adm, SetMicrophoneMute(false));
+  }
+  audio_state->AddSendingStream(&stream, kSampleRate, kNumberOfChannels);
+  audio_state->SetSendingStreamMuted(&stream, true);
+  EXPECT_TRUE(device.recording);
+  audio_state->SetSendingStreamMuted(&stream, false);
+  EXPECT_TRUE(device.recording);
+  audio_state->RemoveSendingStream(&stream);
+  EXPECT_FALSE(device.recording);
+}
+
+TEST_P(AudioStateTest, KeepRecordingModeStartsInitiallyMutedSenderMuted) {
+  ConfigHelper helper(GetParam());
+  auto adm = make_ref_counted<KeepRecordingAudioDevice>();
+  helper.config().audio_device_module = adm;
+  RecordingDeviceState device(*adm);
+  auto audio_state = make_ref_counted<internal::AudioState>(helper.config());
+  MockAudioSendStream stream;
+
+  EXPECT_CALL(*adm, InitRecording()).Times(1);
+  EXPECT_CALL(*adm, StartRecording()).Times(1);
+  EXPECT_CALL(*adm, StopRecording()).Times(1);
+  audio_state->AddSendingStream(&stream, kSampleRate, kNumberOfChannels,
+                                /*muted=*/true);
+  EXPECT_TRUE(device.recording);
+  EXPECT_TRUE(device.microphone_muted);
+  audio_state->RemoveSendingStream(&stream);
+  EXPECT_FALSE(device.recording);
+}
+
+TEST_P(AudioStateTest, KeepRecordingModeRestoresMuteWhenRecordingIsReenabled) {
+  ConfigHelper helper(GetParam());
+  auto adm = make_ref_counted<KeepRecordingAudioDevice>();
+  helper.config().audio_device_module = adm;
+  RecordingDeviceState device(*adm);
+  auto audio_state = make_ref_counted<internal::AudioState>(helper.config());
+  MockAudioSendStream stream;
+
+  EXPECT_CALL(*adm, InitRecording()).Times(2);
+  EXPECT_CALL(*adm, StartRecording()).Times(2);
+  EXPECT_CALL(*adm, StopRecording()).Times(2);
+  audio_state->AddSendingStream(&stream, kSampleRate, kNumberOfChannels);
+  audio_state->SetSendingStreamMuted(&stream, true);
+  EXPECT_TRUE(device.recording);
+  EXPECT_TRUE(device.microphone_muted);
+  audio_state->SetRecording(false);
+  EXPECT_FALSE(device.recording);
+  audio_state->SetRecording(true);
+  EXPECT_TRUE(device.recording);
+  EXPECT_TRUE(device.microphone_muted);
+  audio_state->RemoveSendingStream(&stream);
+  EXPECT_FALSE(device.recording);
 }
 
 // The recording can also be initialized by WebRtcVoiceSendChannel

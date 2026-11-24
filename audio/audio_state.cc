@@ -176,10 +176,10 @@ void AudioState::UpdateRecordingState(bool force_stop) {
     return;
   }
 
-  if (!adm->IsStopOnMuteModeEnabled()) {
-    adm->SetMicrophoneMute(all_muted);
-  }
   if (adm->Recording()) {
+    if (!adm->IsStopOnMuteModeEnabled()) {
+      adm->SetMicrophoneMute(all_muted);
+    }
     return;
   }
   if (adm->InitRecording() != 0) {
@@ -195,6 +195,11 @@ void AudioState::UpdateRecordingState(bool force_stop) {
   }
 #endif
   adm->StartRecording();
+  // Starting the device may reset its mute state. Apply the aggregate after
+  // startup so initially muted senders and recording restarts remain muted.
+  if (!adm->IsStopOnMuteModeEnabled()) {
+    adm->SetMicrophoneMute(all_muted);
+  }
 }
 
 void AudioState::SetStereoChannelSwapping(bool enable) {

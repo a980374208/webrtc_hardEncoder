@@ -998,6 +998,12 @@ class FakeAudioSource : public webrtc::AudioSource {
   void SetSink(Sink* /* sink */) override {}
 };
 
+class MockSendAudioSource : public webrtc::AudioSource {
+ public:
+  MOCK_METHOD(void, SetSink, (Sink* sink), (override));
+  MOCK_METHOD(bool, is_external_source, (), (const, override));
+};
+
 class WebRtcVoiceEngineTestFake : public ::testing::TestWithParam<bool> {
  public:
   explicit WebRtcVoiceEngineTestFake(absl::string_view field_trials_string = "")
@@ -1080,9 +1086,6 @@ class WebRtcVoiceEngineTestFake : public ::testing::TestWithParam<bool> {
     if (!send_channel_->AddSendStream(sp)) {
       return false;
     }
-    if (!use_null_apm_) {
-      EXPECT_CALL(*apm_, set_output_will_be_muted(false));
-    }
     return send_channel_->SetAudioSend(kSsrcX, true, nullptr, &fake_source_);
   }
 
@@ -1131,17 +1134,6 @@ class WebRtcVoiceEngineTestFake : public ::testing::TestWithParam<bool> {
 
   void SetSend(bool enable) {
     ASSERT_TRUE(send_channel_);
-    if (enable) {
-      EXPECT_CALL(*adm_, RecordingIsInitialized())
-          .Times(::testing::AtMost(1))
-          .WillOnce(Return(false));
-      EXPECT_CALL(*adm_, Recording())
-          .Times(::testing::AtMost(1))
-          .WillOnce(Return(false));
-      EXPECT_CALL(*adm_, InitRecording())
-          .Times(::testing::AtMost(1))
-          .WillOnce(Return(0));
-    }
     send_channel_->SetSend(enable);
   }
 
@@ -1164,9 +1156,6 @@ class WebRtcVoiceEngineTestFake : public ::testing::TestWithParam<bool> {
                     webrtc::AudioSource* source,
                     const webrtc::AudioOptions* options = nullptr) {
     ASSERT_TRUE(send_channel_);
-    if (!use_null_apm_) {
-      EXPECT_CALL(*apm_, set_output_will_be_muted(!enable));
-    }
     EXPECT_TRUE(send_channel_->SetAudioSend(ssrc, enable, options, source));
   }
 
@@ -3188,6 +3177,99 @@ TEST_P(WebRtcVoiceEngineTestFake, SendStateMuteUnmute) {
   EXPECT_TRUE(GetSendStream(kSsrcX).muted());
 }
 
+TEST_P(WebRtcVoiceEngineTestFake,
+       SourceTypeChangesInBothDirectionsWithoutReplacingAdapter) {
+  ASSERT_TRUE(SetupChannel());
+  ASSERT_TRUE(send_channel_->AddSendStream(
+      webrtc::StreamParams::CreateLegacy(kSsrcX)));
+  SetSenderParameters(send_parameters_);
+  SetSend(true);
+  EXPECT_TRUE(GetSendStreamConfig(kSsrcX).external_source);
+
+  StrictMock<MockSendAudioSource> source;
+  bool external_source = false;
+  EXPECT_CALL(source, is_external_source())
+      .WillRepeatedly(ReturnPointee(&external_source));
+  webrtc::AudioSource::Sink* sink = nullptr;
+  EXPECT_CALL(source, SetSink(_)).WillOnce(SaveArg<0>(&sink));
+  SetAudioSend(kSsrcX, true, &source);
+  ASSERT_NE(sink, nullptr);
+  const int stream_id = GetSendStream(kSsrcX).id();
+  EXPECT_FALSE(GetSendStreamConfig(kSsrcX).external_source);
+
+  // Track replacement reuses the source adapter and the native send stream.
+  external_source = true;
+  SetAudioSend(kSsrcX, true, &source);
+  EXPECT_TRUE(GetSendStreamConfig(kSsrcX).external_source);
+  external_source = false;
+  SetAudioSend(kSsrcX, true, &source);
+  EXPECT_FALSE(GetSendStreamConfig(kSsrcX).external_source);
+  EXPECT_EQ(GetSendStream(kSsrcX).id(), stream_id);
+  EXPECT_TRUE(GetSendStream(kSsrcX).IsSending());
+
+  EXPECT_CALL(source, SetSink(nullptr));
+  SetAudioSend(kSsrcX, false, nullptr);
+}
+
+TEST_P(WebRtcVoiceEngineTestFake,
+       ClearAndCloseSourceReleaseNativeCaptureWhileKeepingRtpSender) {
+  ASSERT_TRUE(SetupChannel());
+  ASSERT_TRUE(send_channel_->AddSendStream(
+      webrtc::StreamParams::CreateLegacy(kSsrcX)));
+  SetSenderParameters(send_parameters_);
+  SetSend(true);
+
+  StrictMock<MockSendAudioSource> source;
+  EXPECT_CALL(source, is_external_source()).WillRepeatedly(Return(false));
+  webrtc::AudioSource::Sink* sink = nullptr;
+  EXPECT_CALL(source, SetSink(_)).WillOnce(SaveArg<0>(&sink));
+  SetAudioSend(kSsrcX, true, &source);
+  EXPECT_FALSE(GetSendStreamConfig(kSsrcX).external_source);
+  const int stream_id = GetSendStream(kSsrcX).id();
+
+  EXPECT_CALL(source, SetSink(nullptr));
+  SetAudioSend(kSsrcX, false, nullptr);
+  EXPECT_TRUE(GetSendStreamConfig(kSsrcX).external_source);
+  EXPECT_TRUE(GetSendStream(kSsrcX).IsSending());
+
+  EXPECT_CALL(source, SetSink(_)).WillOnce(SaveArg<0>(&sink));
+  SetAudioSend(kSsrcX, true, &source);
+  ASSERT_NE(sink, nullptr);
+  EXPECT_FALSE(GetSendStreamConfig(kSsrcX).external_source);
+  sink->OnClose();
+  EXPECT_TRUE(GetSendStreamConfig(kSsrcX).external_source);
+  EXPECT_TRUE(GetSendStream(kSsrcX).IsSending());
+  EXPECT_EQ(GetSendStream(kSsrcX).id(), stream_id);
+}
+
+TEST_P(WebRtcVoiceEngineTestFake, DisabledReplacementIsMutedBeforeNativeBinding) {
+  ASSERT_TRUE(SetupChannel());
+  ASSERT_TRUE(send_channel_->AddSendStream(
+      webrtc::StreamParams::CreateLegacy(kSsrcX)));
+  SetSenderParameters(send_parameters_);
+  SetSend(true);
+
+  StrictMock<MockSendAudioSource> source;
+  EXPECT_CALL(source, is_external_source())
+      .WillOnce(Return(true))
+      .WillOnce([&] {
+        EXPECT_TRUE(GetSendStream(kSsrcX).muted());
+        return false;
+      });
+  EXPECT_CALL(source, SetSink(_));
+  SetAudioSend(kSsrcX, true, &source);
+  ASSERT_FALSE(GetSendStream(kSsrcX).muted());
+
+  // The disabled native replacement must be muted before it can be enrolled
+  // in an AudioState already recording for another sender.
+  SetAudioSend(kSsrcX, false, &source);
+  EXPECT_TRUE(GetSendStream(kSsrcX).muted());
+  EXPECT_FALSE(GetSendStreamConfig(kSsrcX).external_source);
+
+  EXPECT_CALL(source, SetSink(nullptr));
+  SetAudioSend(kSsrcX, false, nullptr);
+}
+
 // Test that SetSenderParameters() does not alter a stream's send state.
 TEST_P(WebRtcVoiceEngineTestFake, SendStateWhenStreamsAreRecreated) {
   EXPECT_TRUE(SetupSendStream());
@@ -3996,9 +4078,10 @@ TEST_P(WebRtcVoiceEngineTestFake, SetAudioOptions) {
 }
 
 TEST_P(WebRtcVoiceEngineTestFake, InitRecordingOnSend) {
-  EXPECT_CALL(*adm_, RecordingIsInitialized()).WillOnce(Return(false));
-  EXPECT_CALL(*adm_, Recording()).WillOnce(Return(false));
-  EXPECT_CALL(*adm_, InitRecording()).Times(1);
+  // AudioState initializes the device only after a native source is active.
+  EXPECT_CALL(*adm_, RecordingIsInitialized()).Times(0);
+  EXPECT_CALL(*adm_, Recording()).Times(0);
+  EXPECT_CALL(*adm_, InitRecording()).Times(0);
 
   std::unique_ptr<webrtc::VoiceMediaSendChannelInterface> send_channel(
       engine_->CreateSendChannel(
@@ -4035,12 +4118,9 @@ TEST_P(WebRtcVoiceEngineTestFake, SetOptionOverridesViaChannels) {
   EXPECT_CALL(*adm_, BuiltInNSIsAvailable())
       .Times(use_null_apm_ ? 5 : 8)
       .WillRepeatedly(Return(false));
-  EXPECT_CALL(*adm_, RecordingIsInitialized())
-      .Times(2)
-      .WillRepeatedly(Return(false));
-
-  EXPECT_CALL(*adm_, Recording()).Times(2).WillRepeatedly(Return(false));
-  EXPECT_CALL(*adm_, InitRecording()).Times(2).WillRepeatedly(Return(0));
+  EXPECT_CALL(*adm_, RecordingIsInitialized()).Times(0);
+  EXPECT_CALL(*adm_, Recording()).Times(0);
+  EXPECT_CALL(*adm_, InitRecording()).Times(0);
 
   std::unique_ptr<webrtc::VoiceMediaSendChannelInterface> send_channel1(
       engine_->CreateSendChannel(
